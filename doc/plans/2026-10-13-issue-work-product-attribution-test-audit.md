@@ -10,7 +10,7 @@ The route's `resolveWorkProductCreatedByRunId` helper takes no work-product type
 
 ## Audit scope and evidence
 
-Read all 83 declarations: 63 plain `it` declarations and 19 `it.each` declarations, including parameter rows and the human self-handoff cases added in #16082. The parameter rows expand to 142 runtime cases. Retain all other declarations: their route registrations, actor classes, recovery authority, admission, workspace defaults, or observable ordering differ. In particular, independently registered write routes must each preserve their authorization gate, even when they share a helper.
+Read all 83 original declarations, including the human self-handoff cases added in #16082. Before removal, the suite had 64 plain `it` declarations and 19 `it.each` declarations. After removal, it has 63 plain declarations and 19 `it.each` declarations; the 19 tables expand to 79 rows, for 142 runtime cases. Retain all other declarations: their route registrations, actor classes, recovery authority, admission, workspace defaults, or observable ordering differ. In particular, independently registered write routes must each preserve their authorization gate, even when they share a helper.
 
 Reviewed the owning route attribution helper and POST handler, work-product service persistence and metadata helper, sibling `work-products.test.ts`, production route mounting, CLI work-product create/update commands, board API calls, test helper and Vitest configuration, CI selection, and relevant history. The removed case originated in `86b0fe7d01` on June 5; the stronger keeper arrived in `87d05e194b` (#12717) on September 2.
 
