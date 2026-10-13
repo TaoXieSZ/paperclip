@@ -24,6 +24,8 @@ const dialogState = vi.hoisted(() => ({
 }));
 
 const mockIssuesApi = vi.hoisted(() => ({
+  get: vi.fn(),
+  listAll: vi.fn(),
   list: vi.fn(),
   listLabels: vi.fn(),
 }));
@@ -222,7 +224,7 @@ function createIssue(overrides: Partial<Issue> = {}): Issue {
     assigneeUserId: null,
     responsibleUserId: null,
     createdByAgentId: null,
-    createdByUserId: null,
+    createdByUserId: "person",
     issueNumber: 1,
     requestDepth: 0,
     billingCode: null,
@@ -354,6 +356,7 @@ describe("IssuesList", () => {
     mockInstanceSettingsApi.getExperimental.mockReset();
     mockExternalObjectsApi.getIssueSummaries.mockReset();
     mockIssuesApi.list.mockResolvedValue([]);
+    mockIssuesApi.listAll.mockResolvedValue([]);
     mockIssuesApi.listLabels.mockResolvedValue([]);
     mockAuthApi.getSession.mockResolvedValue({ user: null, session: null });
     mockAccessApi.listMembers.mockResolvedValue({ members: [], access: {} });
@@ -1354,7 +1357,7 @@ describe("IssuesList", () => {
         agents={[]}
         projects={[]}
         viewStateKey="paperclip:test-issues"
-        enableRoutineVisibilityFilter
+        enableAgentCreatedVisibilityFilter
         onUpdateIssue={() => undefined}
       />,
       container,
@@ -1365,11 +1368,13 @@ describe("IssuesList", () => {
         status: "backlog",
         limit: 200,
         includeRoutineExecutions: true,
+        includeAgentCreatedTasks: false,
       }), { signal: expect.any(AbortSignal) });
       expect(mockIssuesApi.list).toHaveBeenCalledWith("company-1", expect.objectContaining({
         status: "done",
         limit: 200,
         includeRoutineExecutions: true,
+        includeAgentCreatedTasks: false,
       }), { signal: expect.any(AbortSignal) });
       expect(mockKanbanBoard).toHaveBeenLastCalledWith(expect.objectContaining({
         issues: expect.arrayContaining([
@@ -2014,11 +2019,12 @@ describe("IssuesList", () => {
     });
   });
 
-  it("shows routine-backed issues by default and hides them when the routine filter is toggled off", async () => {
+  it("hides automated roots by default and reveals them when checked", async () => {
     const manualIssue = createIssue({
       id: "issue-manual",
       identifier: "PAP-10",
       title: "Manual issue",
+      createdByUserId: "person",
       originKind: "manual",
     });
     const routineIssue = createIssue({
@@ -2034,7 +2040,7 @@ describe("IssuesList", () => {
         agents={[]}
         projects={[]}
         viewStateKey="paperclip:test-issues"
-        enableRoutineVisibilityFilter
+        enableAgentCreatedVisibilityFilter
         onUpdateIssue={() => undefined}
       />,
       container,
@@ -2042,7 +2048,7 @@ describe("IssuesList", () => {
 
     await waitForAssertion(() => {
       expect(container.textContent).toContain("Manual issue");
-      expect(container.textContent).toContain("Routine issue");
+      expect(container.textContent).not.toContain("Routine issue");
     });
 
     await act(async () => {
@@ -2055,21 +2061,21 @@ describe("IssuesList", () => {
 
     await waitForAssertion(() => {
       const toggle = Array.from(document.body.querySelectorAll("label")).find(
-        (label) => label.textContent?.includes("Hide routine runs"),
+        (label) => label.textContent?.includes("Show agent-created tasks"),
       );
       expect(toggle).not.toBeUndefined();
     });
 
     await act(async () => {
       const toggle = Array.from(document.body.querySelectorAll("label")).find(
-        (label) => label.textContent?.includes("Hide routine runs"),
+        (label) => label.textContent?.includes("Show agent-created tasks"),
       );
       toggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await Promise.resolve();
     });
 
     await waitForAssertion(() => {
-      expect(container.textContent).not.toContain("Routine issue");
+      expect(container.textContent).toContain("Routine issue");
     });
 
     act(() => {

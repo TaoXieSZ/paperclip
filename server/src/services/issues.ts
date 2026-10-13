@@ -1,4 +1,5 @@
 import { automaticReadRecoveryCleanupCondition, touchedByUserCondition } from "./issue-participation.js";
+import { HUMAN_TASK_ORIGIN_KINDS } from "@paperclipai/shared";
 import { resolveProjectDefaultWorkspaceId } from "./project-default-workspace.js";
 import { type AuthorizationActor, executionWorkspaceReadSqlCondition, projectReadSqlCondition } from "./authorization.js";
 import { assertTaskWorkspaceAccess, assertTaskWorkspaceSourceProjectAccess } from "./task-workspace-source-access.js";
@@ -1834,6 +1835,9 @@ export interface IssueFilters {
   originKind?: string;
   originKindPrefix?: string;
   originId?: string;
+  includeAgentCreatedTasks?: boolean;
+  /** Authenticated inbox discovery can retain existing participation. */
+  creationVisibilityUserId?: string;
   includeRoutineExecutions?: boolean;
   excludeRoutineExecutions?: boolean;
   includePluginOperations?: boolean;
@@ -6197,6 +6201,21 @@ function assertValidAssigneeAgentFilter(
   }
 }
 
+function humanCreatedIssueCondition() {
+  return and(
+    isNull(issues.createdByAgentId),
+    isNotNull(issues.createdByUserId),
+    inArray(issues.originKind, [...HUMAN_TASK_ORIGIN_KINDS]),
+  )!;
+}
+
+function creationVisibilityCondition(companyId: string, filters?: IssueFilters) {
+  if (filters?.includeAgentCreatedTasks !== false) return undefined;
+  return filters.creationVisibilityUserId
+    ? or(humanCreatedIssueCondition(), touchedByUserCondition(companyId, filters.creationVisibilityUserId))!
+    : humanCreatedIssueCondition();
+}
+
 async function blockedInboxIssueConditions(
   dbOrTx: any,
   companyId: string,
@@ -6208,6 +6227,8 @@ async function blockedInboxIssueConditions(
     notInArray(issues.status, [...BLOCKED_INBOX_TERMINAL_STATUSES]),
   ];
   if (filters?.readCondition) conditions.push(filters.readCondition);
+  const creationCondition = creationVisibilityCondition(companyId, filters);
+  if (creationCondition) conditions.push(creationCondition);
   const touchedByUserId = filters?.touchedByUserId?.trim() || undefined;
   const inboxArchivedByUserId =
     filters?.inboxArchivedByUserId?.trim() || undefined;
@@ -7971,6 +7992,8 @@ export function issueService(db: Db) {
       }
       if (filters?.afterId) conditions.push(gt(issues.id, filters.afterId));
       if (filters?.readCondition) conditions.push(filters.readCondition);
+      const creationCondition = creationVisibilityCondition(companyId, filters);
+      if (creationCondition) conditions.push(creationCondition);
       const assigneeAgentFilter = parseIssueAssigneeAgentFilter(
         filters?.assigneeAgentId,
       );
@@ -8299,6 +8322,8 @@ export function issueService(db: Db) {
 
       const conditions = [eq(issues.companyId, companyId), visibleIssueCondition()];
       if (filters?.readCondition) conditions.push(filters.readCondition);
+      const creationCondition = creationVisibilityCondition(companyId, filters);
+      if (creationCondition) conditions.push(creationCondition);
       if (!filters?.q?.trim()) {
         conditions.push(isNull(issues.conversationAgentId));
         if (!filters?.touchedByUserId && !filters?.unreadForUserId && !filters?.inboxArchivedByUserId) {

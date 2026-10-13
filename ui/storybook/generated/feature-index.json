@@ -171,7 +171,7 @@
         {
           "id": "inbox-search",
           "title": "Inbox, decisions, and search",
-          "description": "Personal triage, decision queues, unread/blocked views, and search.",
+          "description": "Personal triage, decision queues, unread/blocked views, search, and personal task toasts.",
           "capabilities": [
             {
               "id": "inbox-search/views",
@@ -192,6 +192,11 @@
               "id": "inbox-search/search",
               "label": "Search",
               "description": "query company work and follow a result to its original record."
+            },
+            {
+              "id": "inbox-search/toasts",
+              "label": "Toasts",
+              "description": "receive live task notifications only for personal participation or explicit mentions."
             }
           ]
         },

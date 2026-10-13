@@ -594,7 +594,7 @@ function OpenFiltersPopover() {
           projects={storybookProjects.map((project) => ({ id: project.id, name: project.name }))}
           labels={storybookIssueLabels.map((label) => ({ id: label.id, name: label.name, color: label.color }))}
           currentUserId="user-board"
-          enableRoutineVisibilityFilter
+          enableAgentCreatedVisibilityFilter
           buttonVariant="outline"
           creators={[
             { id: "user:user-board", label: "Riley Board", kind: "user", searchText: "board user human" },
@@ -771,7 +771,7 @@ function IssueManagementStories() {
               viewStateKey={issueListViewKey}
               onUpdateIssue={() => undefined}
               createIssueLabel="issue"
-              enableRoutineVisibilityFilter
+              enableAgentCreatedVisibilityFilter
             />
           </Section>
 

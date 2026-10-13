@@ -8312,6 +8312,20 @@ export function issueRoutes(
     const hasPlanDocument = parseOptionalBooleanQuery(
       req.query.hasPlanDocument,
     );
+    const includeParticipatedTasks = parseOptionalBooleanQuery(req.query.includeParticipatedTasks);
+    if (includeParticipatedTasks === null) {
+      res.status(400).json({ error: "includeParticipatedTasks must be true or false when provided" });
+      return;
+    }
+    if (includeParticipatedTasks && (req.actor.type !== "board" || !req.actor.userId)) {
+      res.status(403).json({ error: "includeParticipatedTasks requires board authentication" });
+      return;
+    }
+    const includeAgentCreatedTasks = parseOptionalBooleanQuery(req.query.includeAgentCreatedTasks);
+    if (includeAgentCreatedTasks === null) {
+      res.status(400).json({ error: "includeAgentCreatedTasks must be true or false when provided" });
+      return;
+    }
     const includeLiveDescendantSummary = parseOptionalBooleanQuery(
       req.query.includeLiveDescendantSummary,
     );
@@ -8479,6 +8493,8 @@ export function issueRoutes(
       includeBlockedInboxAttention:
         req.query.includeBlockedInboxAttention === "true" ||
         req.query.includeBlockedInboxAttention === "1",
+      includeAgentCreatedTasks,
+      creationVisibilityUserId: includeParticipatedTasks === true && req.actor.type === "board" ? req.actor.userId : undefined,
       includeLiveDescendantSummary: includeLiveDescendantSummary === true,
       hasPlanDocument,
       q: req.query.q as string | undefined,

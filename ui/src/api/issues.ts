@@ -102,6 +102,8 @@ export type IssueListFilters = {
   originId?: string;
   descendantOf?: string;
   createdFromIssueId?: string;
+  includeAgentCreatedTasks?: boolean;
+  includeParticipatedTasks?: boolean;
   includeRoutineExecutions?: boolean;
   includeBlockedBy?: boolean;
   includeBlockedInboxAttention?: boolean;
@@ -143,6 +145,9 @@ function issueListSearchParams(filters?: IssueListFilters) {
   if (filters?.originId) params.set("originId", filters.originId);
   if (filters?.descendantOf) params.set("descendantOf", filters.descendantOf);
   if (filters?.createdFromIssueId) params.set("createdFromIssueId", filters.createdFromIssueId);
+  if (filters?.includeParticipatedTasks) params.set("includeParticipatedTasks", "true");
+  if (filters?.includeAgentCreatedTasks !== undefined)
+    params.set("includeAgentCreatedTasks", String(filters.includeAgentCreatedTasks));
   if (filters?.includeRoutineExecutions)
     params.set("includeRoutineExecutions", "true");
   if (filters?.includeBlockedBy) params.set("includeBlockedBy", "true");

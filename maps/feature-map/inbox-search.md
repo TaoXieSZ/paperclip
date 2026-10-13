@@ -46,6 +46,8 @@ cover exclusion of historical automatic read cleanup from user participation,
 unread counts, and activity timestamps while retaining explicit user decisions
 and audit history.
 
+Manual: Seed a scheduled routine execution owned by the current human. It stays out of Mine until an existing participation rule admits it. Verify comments, assignment, and manual routine runs admit automated tasks while reading alone does not. Inbox discovery and Blocked hide unrelated automation by default; the **Show agent-created tasks** checkbox reveals it without subscribing the user. Reload and verify membership, unread badges, archive/resurfacing, and preference persistence.
+
 Manual: Read an unread task, return to Unread, archive a handled item, and reload. Verify personal triage state changes while task status stays correct. Switch users and companies to check isolation.
 
 Seed a completed task whose only activity under the viewing user is automatic

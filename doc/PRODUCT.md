@@ -72,6 +72,25 @@ the latest agent that assigned it to them. If no assignment is available, it use
 the latest other commenter, or leaves the recipient empty. A manual recipient
 choice stays selected while task data refreshes.
 
+### Task collection creation filters
+
+Tasks and project lists hide agent-created and system-created tasks by default.
+The Filters menu's **Show agent-created tasks** checkbox includes routine runs,
+recovery/watchdog tasks, and other automation. The choice is saved per company
+and collection; Clear filters restores the hidden default. Nested lists preserve
+ancestors and expandable subtasks as context without promoting unrelated automated
+work to independent results. Agent profiles, routine histories, and task-detail
+subtasks retain their full history.
+
+Inbox membership continues to follow human creation, assignment, comments, and
+existing qualifying participation actions, including manually running a routine.
+Routine ownership or responsibility alone does not subscribe a person to scheduled
+runs; opening or reading a task is not participation. Inbox discovery searches and
+Blocked hide unrelated automated tasks unless the checkbox is checked, while
+preserving tasks admitted by the existing participation rules. Checking it does
+not subscribe the user to all automation. Approvals and other non-task items keep
+their existing rules.
+
 ### Company Skills and Policy
 
 Company skills are shared operating capabilities, not privileged objects by default. Every authenticated agent in a company can create, import, install, edit, update, test, reset, and remove that company's skills unless the company has configured an explicit restriction.

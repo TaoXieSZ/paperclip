@@ -2187,3 +2187,21 @@ See [the layer architecture](plans/2026-10-09-task-workspaces.md) for resolution
 ## Company fast-response service
 
 Companies may configure an optional shared API connection and model for short acknowledgements of accepted human turns. Fast responses use direct SDK inference alongside normal agent work, with a three-second admission deadline, bounded prompts/output, current authorization and independent `fast_response` accounting. They are server-marked platform receipts attributed to the agent, never completion, interaction or recovery evidence. Company-sponsored unlinked external senders are explicit; linked-user permission denials are never bypassed. See [fast-responses.md](fast-responses.md) for provider, delivery, history and endpoint contracts.
+
+### Task collection creation visibility (2026-10-13)
+
+Tasks and project collections default to hiding agent/system-created tasks and
+provide a saved **Show agent-created tasks** filter. Classify creation using
+creator identity and origin; assignee/responsible users do not imply human
+authorship. Routine executions remain automated even when manually triggered.
+Creator-less tasks are system-created. Human ordinary, channel, and onboarding
+tasks remain visible. Apply collection creation filters before search limits and
+pagination, and retrieve hierarchy context separately under existing access checks.
+Context does not count as independent results or board cards.
+
+Inbox membership, archives, unread state, and badges retain existing participation
+rules, including assignment, comments, and manual routine runs. Responsibility and
+read-only activity do not admit scheduled work. Inbox discovery/Blocked preserve
+participated automation and hide unrelated automation by default. Agent profile
+history, routine history, and task-detail subtasks remain complete. API consumers
+that omit the optional creation filter retain their existing list behavior.
