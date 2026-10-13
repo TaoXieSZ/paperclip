@@ -1,3 +1,5 @@
+import { saveTaskCollectionPreferences } from "../lib/task-collection-preferences";
+import { useShowAgentCreatedTasks } from "../hooks/useShowAgentCreatedTasks";
 import { useIssueHierarchyContext } from "../hooks/useIssueHierarchyContext";
 import { includeIssueHierarchyContext } from "../lib/issue-hierarchy-context";
 import { AgentIdentity } from "@/components/AgentIdentity";
@@ -210,10 +212,6 @@ function getViewState(key: string): IssueViewState {
   return { ...defaultViewState };
 }
 
-function saveViewState(key: string, state: IssueViewState) {
-  localStorage.setItem(key, JSON.stringify(state));
-}
-
 function getInitialViewState(
   key: string,
   initialAssignees?: string[],
@@ -268,17 +266,6 @@ function loadIssueColumns(key: string): InboxIssueColumn[] {
     return normalizeInboxIssueColumns(parsed);
   } catch {
     return DEFAULT_INBOX_ISSUE_COLUMNS;
-  }
-}
-
-function saveIssueColumns(key: string, columns: InboxIssueColumn[]) {
-  try {
-    localStorage.setItem(
-      getIssueColumnsStorageKey(key),
-      JSON.stringify(normalizeInboxIssueColumns(columns)),
-    );
-  } catch {
-    // Ignore localStorage failures.
   }
 }
 
@@ -768,6 +755,12 @@ export function IssuesList({
   const [viewState, setViewState] = useState<IssueViewState>(() =>
     getInitialWorkspaceViewState(scopedKey, initialAssignees, initialWorkspaces, defaultSortField),
   );
+  const showAgentCreatedTasks = useShowAgentCreatedTasks(selectedCompanyId, viewStateKey);
+  useEffect(() => {
+    if (!enableAgentCreatedVisibilityFilter) return;
+    setViewState((previous) => previous.showAgentCreatedTasks === showAgentCreatedTasks
+      ? previous : { ...previous, showAgentCreatedTasks });
+  }, [enableAgentCreatedVisibilityFilter, showAgentCreatedTasks]);
   const [assigneePickerIssueId, setAssigneePickerIssueId] = useState<string | null>(null);
   const [assigneeSearch, setAssigneeSearch] = useState("");
   const [issueSearch, setIssueSearch] = useState(initialSearch ?? "");
@@ -803,10 +796,13 @@ export function IssuesList({
   const updateView = useCallback((patch: Partial<IssueViewState>) => {
     setViewState((prev) => {
       const next = { ...prev, ...patch };
-      saveViewState(scopedKey, next);
+      saveTaskCollectionPreferences({
+        companyId: selectedCompanyId ?? "__unscoped__", collectionKey: viewStateKey,
+        legacyViewStorageKey: scopedKey, legacyColumnsStorageKey: getIssueColumnsStorageKey(scopedKey),
+      }, { viewState: next, columns: visibleIssueColumns });
       return next;
     });
-  }, [scopedKey]);
+  }, [scopedKey, selectedCompanyId, viewStateKey, visibleIssueColumns]);
 
   useEffect(() => {
     if (!experimentalSettingsLoaded || externalObjectsEnabled || viewState.externalObjectStatuses.length === 0) return;
@@ -1212,6 +1208,7 @@ export function IssuesList({
   const hierarchy = useIssueHierarchyContext(
     selectedCompanyId, filtered.slice(0, renderedIssueRowLimit), viewState.collapsedParents,
     enableAgentCreatedVisibilityFilter && !viewState.showAgentCreatedTasks && viewState.nestingEnabled && viewState.viewMode === "list",
+    renderedIssueRowLimit,
   );
   const baseGroupedContent = useMemo(() => {
     if (viewState.groupBy === "none") {
@@ -1642,8 +1639,11 @@ export function IssuesList({
   const setIssueColumns = useCallback((next: InboxIssueColumn[]) => {
     const normalized = normalizeInboxIssueColumns(next);
     setVisibleIssueColumns(normalized);
-    saveIssueColumns(scopedKey, normalized);
-  }, [scopedKey]);
+    saveTaskCollectionPreferences({
+      companyId: selectedCompanyId ?? "__unscoped__", collectionKey: viewStateKey,
+      legacyViewStorageKey: scopedKey, legacyColumnsStorageKey: getIssueColumnsStorageKey(scopedKey),
+    }, { viewState, columns: normalized });
+  }, [scopedKey, selectedCompanyId, viewStateKey, viewState]);
 
   const toggleIssueColumn = useCallback((column: InboxIssueColumn, enabled: boolean) => {
     if (enabled) {

@@ -13,6 +13,7 @@ import {
   issueAgeSeparatorLabel,
 } from "./IssuesList";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { useShowAgentCreatedTasks } from "../hooks/useShowAgentCreatedTasks";
 import { taskCollectionPreferencesStorageKey } from "../lib/task-collection-preferences";
 
 const companyState = vi.hoisted(() => ({
@@ -2019,7 +2020,12 @@ describe("IssuesList", () => {
     });
   });
 
-  it("hides automated roots by default and reveals them when checked", async () => {
+  it.each([true, false])("keeps visibility controls and fetching preferences synchronized (streamlined=%s)", async (streamlined) => {
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableStreamlinedUi: streamlined });
+    function PreferenceProbe() {
+      const included = useShowAgentCreatedTasks("company-1", "paperclip:test-issues");
+      return <span data-testid="creation-preference">{String(included)}</span>;
+    }
     const manualIssue = createIssue({
       id: "issue-manual",
       identifier: "PAP-10",
@@ -2035,14 +2041,14 @@ describe("IssuesList", () => {
     });
 
     const { root } = renderWithQueryClient(
-      <IssuesList
+      <><PreferenceProbe /><IssuesList
         issues={[manualIssue, routineIssue]}
         agents={[]}
         projects={[]}
         viewStateKey="paperclip:test-issues"
         enableAgentCreatedVisibilityFilter
         onUpdateIssue={() => undefined}
-      />,
+      /></>,
       container,
     );
 
@@ -2076,11 +2082,23 @@ describe("IssuesList", () => {
 
     await waitForAssertion(() => {
       expect(container.textContent).toContain("Routine issue");
+      expect(container.querySelector("[data-testid='creation-preference']")?.textContent).toBe("true");
     });
-
-    act(() => {
-      root.unmount();
+    const preferenceKey = taskCollectionPreferencesStorageKey({ companyId: "company-1", collectionKey: "paperclip:test-issues" });
+    const envelope = JSON.parse(localStorage.getItem(preferenceKey)!);
+    await act(async () => {
+      localStorage.setItem(preferenceKey, JSON.stringify({ ...envelope, viewState: { ...envelope.viewState, showAgentCreatedTasks: false } }));
+      window.dispatchEvent(new StorageEvent("storage", { key: preferenceKey }));
     });
+    await waitForAssertion(() => {
+      expect(container.textContent).not.toContain("Routine issue");
+      expect(container.querySelector("[data-testid='creation-preference']")?.textContent).toBe("false");
+      const label = Array.from(document.body.querySelectorAll("label")).find((element) => element.textContent?.includes("Show agent-created tasks"));
+      const checkbox = label?.querySelector("[role='checkbox'], input[type='checkbox']");
+      expect(checkbox).not.toBeNull();
+      expect(checkbox instanceof HTMLInputElement ? checkbox.checked : checkbox?.getAttribute("aria-checked") === "true").toBe(false);
+    });
+    act(() => root.unmount());
   });
 
   it("blurs the search input on Enter without clearing the query", async () => {

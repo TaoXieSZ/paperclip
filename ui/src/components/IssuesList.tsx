@@ -1,3 +1,4 @@
+import { useShowAgentCreatedTasks } from "../hooks/useShowAgentCreatedTasks";
 import { useIssueHierarchyContext } from "../hooks/useIssueHierarchyContext";
 import { includeIssueHierarchyContext } from "../lib/issue-hierarchy-context";
 import { AgentIdentity } from "@/components/AgentIdentity";
@@ -824,6 +825,12 @@ function StreamlinedIssuesList({
       initialStatuses,
     ),
   );
+  const showAgentCreatedTasks = useShowAgentCreatedTasks(selectedCompanyId, viewStateKey);
+  useEffect(() => {
+    if (!enableAgentCreatedVisibilityFilter) return;
+    setViewState((previous) => previous.showAgentCreatedTasks === showAgentCreatedTasks
+      ? previous : { ...previous, showAgentCreatedTasks });
+  }, [enableAgentCreatedVisibilityFilter, showAgentCreatedTasks]);
   const [assigneePickerIssueId, setAssigneePickerIssueId] = useState<string | null>(null);
   const [assigneeSearch, setAssigneeSearch] = useState("");
   const [issueSearch, setIssueSearch] = useState(initialSearch ?? "");
@@ -1296,6 +1303,7 @@ function StreamlinedIssuesList({
   const hierarchy = useIssueHierarchyContext(
     selectedCompanyId, filtered.slice(0, renderedIssueRowLimit), viewState.collapsedParents,
     enableAgentCreatedVisibilityFilter && !viewState.showAgentCreatedTasks && viewState.nestingEnabled && viewState.viewMode === "list",
+    renderedIssueRowLimit,
   );
   const baseGroupedContent = useMemo(() => {
     if (viewState.groupBy === "none") {

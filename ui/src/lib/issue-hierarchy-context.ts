@@ -30,3 +30,35 @@ export function includeIssueHierarchyContext(matches: Issue[], context: Issue[])
   }
   return [...result.values()];
 }
+
+/** Fetch each parent once and stop at the collection's current rendering budget. */
+export async function loadIssueHierarchyChildren(
+  companyId: string,
+  matches: Issue[],
+  collapsedParents: string[],
+  rowBudget: number,
+  readChildren: (parentId: string, limit: number, offset: number) => Promise<Issue[]>,
+): Promise<Issue[]> {
+  const context: Issue[] = [];
+  const queue = matches.map((issue) => ({ issue, offset: 0 }));
+  const visited = new Set<string>();
+  const fetched = new Set<string>();
+  let requests = 0;
+  while (queue.length > 0 && context.length < rowBudget && requests < rowBudget) {
+    const { issue, offset } = queue.shift()!;
+    if (offset === 0 && visited.has(issue.id)) continue;
+    visited.add(issue.id);
+    const collapsed = collapsedParents.includes(issue.id);
+    const limit = collapsed ? 1 : Math.min(100, rowBudget - context.length);
+    const rows = await readChildren(issue.id, limit, offset);
+    requests += 1;
+    for (const child of rows) {
+      if (child.companyId !== companyId || fetched.has(child.id)) continue;
+      fetched.add(child.id);
+      context.push(child);
+      if (!collapsed) queue.push({ issue: child, offset: 0 });
+    }
+    if (!collapsed && rows.length === limit) queue.unshift({ issue, offset: offset + rows.length });
+  }
+  return context;
+}

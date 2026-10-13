@@ -8,6 +8,13 @@ describe("task creation source", () => {
   it.each(["routine_execution", "stranded_issue_recovery", "task_watchdog", "harness_liveness_escalation", "plugin:workflow:operation", "built_in_agent_bundle", "pipeline_automation"])("classifies %s as automated even with human attribution", (originKind) => {
     expect(isAgentCreatedIssue({ createdByUserId: "person", originKind })).toBe(true);
   });
+  it("preserves human inbound channels without a local user account", () => {
+    expect(isAgentCreatedIssue({ originKind: "chat_channel", originId: "email:endpoint:thread" })).toBe(false);
+    expect(isAgentCreatedIssue({ originKind: "chat_channel", originId: "guest-endpoint" })).toBe(false);
+    expect(isAgentCreatedIssue({ originKind: "chat_channel", originId: "email-send:tool-call" })).toBe(true);
+    expect(isAgentCreatedIssue({ createdByUserId: "person", originKind: "chat_channel", originId: "email-send:tool-call" })).toBe(true);
+    expect(isAgentCreatedIssue({ createdByAgentId: "agent", originKind: "chat_channel" })).toBe(true);
+  });
   it("recognizes agents and creator-less ordinary tasks", () => {
     expect(isAgentCreatedIssue({ createdByAgentId: "agent", originKind: "manual" })).toBe(true);
     expect(isAgentCreatedIssue({ originKind: "manual" })).toBe(true);

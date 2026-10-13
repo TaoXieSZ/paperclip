@@ -1,10 +1,11 @@
-import { useQueries } from "@tanstack/react-query";
+import { loadIssueHierarchyChildren } from "../lib/issue-hierarchy-context";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import type { Issue } from "@paperclipai/shared";
 import { issuesApi } from "../api/issues";
 import { ApiError } from "../api/client";
 import { queryKeys } from "../lib/queryKeys";
 
-export function useIssueHierarchyContext(companyId: string | null, matches: Issue[], collapsedParents: string[], enabled: boolean) {
+export function useIssueHierarchyContext(companyId: string | null, matches: Issue[], collapsedParents: string[], enabled: boolean, rowBudget: number) {
   const parents = [...new Set(matches.map((issue) => issue.parentId).filter((id): id is string => Boolean(id)))];
   const ancestorQueries = useQueries({ queries: parents.map((parentId) => ({
     queryKey: [...queryKeys.issues.list(companyId ?? "__unscoped__"), "hierarchy-ancestors", parentId],
@@ -29,18 +30,14 @@ export function useIssueHierarchyContext(companyId: string | null, matches: Issu
       return ancestors;
     },
   })) });
-  const childQueries = useQueries({ queries: matches.map((issue) => {
-    const collapsed = collapsedParents.includes(issue.id);
-    return {
-      queryKey: [...queryKeys.issues.list(companyId ?? "__unscoped__"), "hierarchy-children", issue.id, collapsed],
-      enabled: enabled && Boolean(companyId),
-      staleTime: 30_000,
-      queryFn: ({ signal }: { signal: AbortSignal }) => collapsed
-        ? issuesApi.list(companyId!, { parentId: issue.id, includeRoutineExecutions: true, limit: 1 }, { signal })
-        : issuesApi.listAll(companyId!, { descendantOf: issue.id, includeRoutineExecutions: true }, { signal }),
-    };
-  }) });
-  const queries = [...ancestorQueries, ...childQueries];
+  const children = useQuery({
+    queryKey: [...queryKeys.issues.list(companyId ?? "__unscoped__"), "hierarchy-children", matches.map((issue) => issue.id), collapsedParents, rowBudget],
+    enabled: enabled && Boolean(companyId) && matches.length > 0,
+    staleTime: 30_000,
+    queryFn: ({ signal }) => loadIssueHierarchyChildren(companyId!, matches, collapsedParents, rowBudget,
+      (parentId, limit, offset) => issuesApi.list(companyId!, { parentId, limit, offset, includeRoutineExecutions: true }, { signal })),
+  });
+  const queries = [...ancestorQueries, children];
   return {
     issues: queries.flatMap((query) => query.data ?? []),
     error: queries.find((query) => query.error)?.error,

@@ -1,5 +1,5 @@
 import { automaticReadRecoveryCleanupCondition, touchedByUserCondition } from "./issue-participation.js";
-import { HUMAN_TASK_ORIGIN_KINDS } from "@paperclipai/shared";
+import { AUTOMATED_CHANNEL_ORIGIN_PREFIX, HUMAN_TASK_ORIGIN_KINDS } from "@paperclipai/shared";
 import { resolveProjectDefaultWorkspaceId } from "./project-default-workspace.js";
 import { type AuthorizationActor, executionWorkspaceReadSqlCondition, projectReadSqlCondition } from "./authorization.js";
 import { assertTaskWorkspaceAccess, assertTaskWorkspaceSourceProjectAccess } from "./task-workspace-source-access.js";
@@ -37,6 +37,7 @@ import {
   lt,
   lte,
   ne,
+  not,
   notExists,
   notInArray,
   or,
@@ -6204,7 +6205,8 @@ function assertValidAssigneeAgentFilter(
 function humanCreatedIssueCondition() {
   return and(
     isNull(issues.createdByAgentId),
-    isNotNull(issues.createdByUserId),
+    or(isNotNull(issues.createdByUserId), eq(issues.originKind, "chat_channel")),
+    or(isNull(issues.originId), not(and(eq(issues.originKind, "chat_channel"), like(issues.originId, `${AUTOMATED_CHANNEL_ORIGIN_PREFIX}%`))!)),
     inArray(issues.originKind, [...HUMAN_TASK_ORIGIN_KINDS]),
   )!;
 }

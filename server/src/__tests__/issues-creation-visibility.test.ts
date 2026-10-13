@@ -22,6 +22,8 @@ describeEmbeddedPostgres("issue creation visibility", () => {
       { id: randomUUID(), companyId, title: "Visibility human", createdByUserId: userId, originKind: "manual" },
       { id: randomUUID(), companyId, title: "Visibility channel", createdByUserId: userId, originKind: "chat_channel" },
       { id: randomUUID(), companyId, title: "Visibility onboarding", createdByUserId: userId, originKind: "onboarding_first_task" },
+      { id: randomUUID(), companyId, title: "Visibility inbound email", originKind: "chat_channel", originId: "email:endpoint:thread" },
+      { id: randomUUID(), companyId, title: "Visibility outbound email", originKind: "chat_channel", originId: "email-send:tool-call" },
       ...["routine_execution", "task_watchdog", "stranded_issue_recovery", "plugin:workflow:task", "harness_liveness_escalation", "manual"].map((originKind) => ({ id: randomUUID(), companyId, title: `Visibility ${originKind}`, originKind, responsibleUserId: userId })),
       { id: randomUUID(), companyId, title: "Visibility manually run routine", createdByUserId: userId, originKind: "routine_execution" },
     ];
@@ -38,7 +40,7 @@ describeEmbeddedPostgres("issue creation visibility", () => {
       const first = await request(app).get(`${path}?includeAgentCreatedTasks=false&q=Visibility&sortField=updated&limit=2${view}`).expect(200);
       const second = await request(app).get(`${path}?includeAgentCreatedTasks=false&q=Visibility&sortField=updated&limit=2&offset=2${view}`).expect(200);
       expect(first.body).toHaveLength(2);
-      expect(second.body).toHaveLength(1);
+      expect(second.body).toHaveLength(2);
       expect([...first.body, ...second.body].every((issue: Parameters<typeof isAgentCreatedIssue>[0]) => !isAgentCreatedIssue(issue))).toBe(true);
     }
     await request(app).get(`${path}?includeAgentCreatedTasks=invalid`).expect(400);
