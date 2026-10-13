@@ -27,8 +27,8 @@ export const DELIVERY_QUEUES = {
 } as const;
 export type DeliveryQueue = typeof DELIVERY_QUEUES[keyof typeof DELIVERY_QUEUES];
 
-export async function notifyDeliveryWork(transaction: object, queue: DeliveryQueue): Promise<void> {
-  await signalDatabaseWork(transaction, queue);
+export async function notifyDeliveryWork(transaction: object, queue: DeliveryQueue, hint?: string): Promise<void> {
+  await signalDatabaseWork(transaction, queue, hint);
 }
 // Public delivery notification observers only see settled work. The coordinator
 // uses the lower-level lifecycle subscription to also fence in-flight writes.

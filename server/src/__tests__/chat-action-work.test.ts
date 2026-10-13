@@ -22,6 +22,8 @@ function setup() {
     processFailedChatRunRetries: vi.fn(async () => {}),
     processPendingTelegramActions: vi.fn(async () => {}),
     processTelegramSubscriptionDiscovery: vi.fn(async () => {}),
+    scheduleTelegramSubscriptionDiscovery: vi.fn(),
+    hasPendingTelegramSubscriptionDiscovery: vi.fn(() => false),
     processPendingProviderEffects: vi.fn(async () => {}),
     processPendingGitHubWebhookIngress: vi.fn(async () => {}),
     processPendingSlackSessionSyncs: vi.fn(async () => {}),
@@ -45,7 +47,8 @@ describe("chat action scheduling", () => {
     const work = s.start();
     await vi.advanceTimersByTimeAsync(1);
     expect(s.service.processTelegramSubscriptionDiscovery).toHaveBeenCalledTimes(1);
-    await s.owner.transaction(tx => notifyChatEndpointWork(tx));
+    await s.owner.transaction(tx => notifyChatEndpointWork(tx, "connection-fixture"));
+    expect(s.service.scheduleTelegramSubscriptionDiscovery).toHaveBeenCalledWith("connection-fixture");
     s.service.processTelegramSubscriptionDiscovery.mockRejectedValueOnce(new Error("discovery unavailable"));
     release();
     await work.ready;
@@ -65,6 +68,7 @@ describe("chat action scheduling", () => {
     for (const run of s.runs) expect(run).toHaveBeenCalledTimes(1);
     expect(s.service.nextChatActionAt).toHaveBeenCalledTimes(9);
     expect(s.service.processTelegramSubscriptionDiscovery).toHaveBeenCalledTimes(1);
+    expect(s.service.scheduleTelegramSubscriptionDiscovery).not.toHaveBeenCalled();
     expect(s.service.nextVerificationMessageAt).toHaveBeenCalledTimes(1);
     expect(s.coordinator.nextWakeAt()).toBeNull();
     expect(vi.getTimerCount()).toBe(0);
@@ -83,7 +87,7 @@ describe("chat action scheduling", () => {
     for (const run of s.runs) expect(run).toHaveBeenCalledTimes(2);
     // Queue claims/settlements do not rediscover every configured endpoint.
     expect(s.service.processTelegramSubscriptionDiscovery).toHaveBeenCalledTimes(1);
-    await s.owner.transaction(tx => notifyChatEndpointWork(tx));
+    await s.owner.transaction(tx => notifyChatEndpointWork(tx, "connection-fixture"));
     await vi.advanceTimersByTimeAsync(1);
     for (const run of s.runs) expect(run).toHaveBeenCalledTimes(3);
     expect(s.service.processTelegramSubscriptionDiscovery).toHaveBeenCalledTimes(2);

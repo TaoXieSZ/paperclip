@@ -19069,7 +19069,7 @@ export function toolAccessService(
         .returning();
       const [row] = existing.transport === "chat_sdk"
         ? await db.transaction(async tx => {
-            await notifyChatEndpointWork(tx);
+            await notifyChatEndpointWork(tx, existing.id);
             const rows = await write(tx as unknown as Db);
             // Credential resolution must never observe the binding rebuild's
             // delete/insert gap after a configuration wake.

@@ -452,9 +452,11 @@ Longer polling intervals alone do not complete an item.
   Telegram maintenance now has separate commit-driven discovery and action
   workers. Discovery restores legacy subscription obligations on startup and
   after endpoint or chat-connection configuration commits, without recurring
-  empty scans. It completes keyset passes so endpoints beyond the first page
-  remain discoverable; failed discovery retains a retry and concurrent changes
-  trigger a fresh pass. Existing action rows provide retry and stale-claim
+  empty scans. Startup walks keyset pages with at most 100 endpoints per run,
+  so endpoints beyond the first page remain discoverable. Configuration commits
+  carry connection hints through outer settlement and uncertainty recovery;
+  they only revisit the changed connection. Failed discovery retains its page,
+  and concurrent edits queue a fresh scoped pass. Existing action rows provide retry and stale-claim
   deadlines. Stop-subscription repair parks while the endpoint or connection
   is inactive; registration and removal keep their existing eligibility.
   The explicit bounded recovery helper remains available. Provider subscription

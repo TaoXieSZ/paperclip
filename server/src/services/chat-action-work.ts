@@ -79,6 +79,8 @@ type ChatActionService = {
   processFailedChatRunRetries(): Promise<unknown>;
   processPendingTelegramActions(): Promise<unknown>;
   processTelegramSubscriptionDiscovery(signal?: AbortSignal): Promise<unknown>;
+  scheduleTelegramSubscriptionDiscovery(connectionId: string): void;
+  hasPendingTelegramSubscriptionDiscovery(): boolean;
   processPendingProviderEffects(): Promise<unknown>;
   processPendingGitHubWebhookIngress(): Promise<unknown>;
   processPendingSlackSessionSyncs(): Promise<unknown>;
@@ -114,14 +116,14 @@ export function registerChatActionWork(
     queue: DELIVERY_QUEUES.chatVerification,
     run: service.processPendingVerificationMessages, next: service.nextVerificationMessageAt,
   }, canRun));
-  // Discover legacy subscription obligations at startup and after configuration
-  // commits. Each complete pass starts at the beginning, so a mutation behind a
-  // running pass's cursor is recovered by the coordinator's dirty follow-up.
+  // Startup recovery visits the full inventory in bounded pages. Configuration
+  // commits only enqueue the changed connection, never restart a global sweep.
   const discovery = coordinator.register(DELIVERY_QUEUES.chatTelegramSubscriptions, {
     retryMs: 1000,
     run: signal => service.processTelegramSubscriptionDiscovery(signal),
+    onSettled: hints => { for (const id of hints ?? []) service.scheduleTelegramSubscriptionDiscovery(id); },
     // Preserve a configuration wake received during idle drain without SQL.
-    hasPending: async () => !canRun(),
+    hasPending: async () => !canRun() || service.hasPendingTelegramSubscriptionDiscovery(),
   });
   workers.push(discovery);
   return { ready: Promise.all(workers.map(worker => worker.ready)) };

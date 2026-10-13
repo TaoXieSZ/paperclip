@@ -71109,6 +71109,9 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
               );
           if (coordinator) {
             await registerChatActionWork(coordinator, lane.context.service, () => true).ready;
+            // Startup recovery uses successive bounded pages. The target is
+            // beyond a complete 100-row confirmed prefix and is not in page one.
+            expect(await targetActions()).toEqual([]);
             await vi.waitFor(async () => {
               expect((await targetActions())[0]?.status).toBe("processed");
               expect(coordinator.nextWakeAt()).toBeNull();
@@ -71167,6 +71170,21 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
             ({ method }) => method === "setWebhook",
           );
           expect(mutations).toHaveLength(1);
+          if (coordinator) {
+            // A committed edit must not rediscover another connection, even
+            // when its durable proof is absent. Startup covers that inventory.
+            const foreignEndpoint = prefixIds[0]!;
+            await db.delete(chatActions).where(and(eq(chatActions.endpointId, foreignEndpoint),
+              eq(chatActions.kind, "telegram_stop_subscription")));
+            await toolAccessService(db).updateConnection(lane.endpoint.connectionId, { name: "Scoped Telegram edit" });
+            await vi.waitFor(() => {
+              expect(coordinator.nextWakeAt()).toBeNull();
+              expect(idleWorkSnapshot().active).toBe(0);
+            }, { timeout: 10_000 });
+            expect(await db.select().from(chatActions).where(and(eq(chatActions.endpointId, foreignEndpoint),
+              eq(chatActions.kind, "telegram_maintenance")))).toEqual([]);
+            expect(lane.maintenanceRequests.filter(({ method }) => method === "setWebhook")).toHaveLength(1);
+          }
           expect(mutations[0]!.body).toEqual({
             url: lane.configuredWebhook.url,
             secret_token: lane.configuredWebhook.secret_token,

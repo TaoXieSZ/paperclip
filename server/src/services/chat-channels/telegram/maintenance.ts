@@ -102,6 +102,9 @@ export function createTelegramMaintenance(db: Db, options: TelegramMaintenanceOp
   const { endpointRecord, runtimeContextForRecord, withCredentialMutationLease, resolveCredentials, clearCredentials, runtimeCallbackEndpoint, getWebhookPublicBaseUrl, fetchImpl, runtimeGeneration, credentialFingerprint, redactError, credentialCheckTimeoutMs: PROVIDER_CREDENTIAL_CHECK_TIMEOUT_MS } = options;
 
   let telegramSubscriptionScanAfter: string | null = null;
+  let startupDiscoveryPending = true;
+  let startupDiscoveryAfter: string | null = null;
+  const pendingDiscovery = new Map<string, { after: string | null }>();
 
   function withMaintenanceWrite<T>(write: (tx: DbTransaction) => Promise<T>): Promise<T> {
     return db.transaction(async tx => {
@@ -560,7 +563,7 @@ export function createTelegramMaintenance(db: Db, options: TelegramMaintenanceOp
     }
   }
 
-  async function discoverTelegramSubscriptions(limit: number, after: string | null) {
+  async function discoverTelegramSubscriptions(limit: number, after: string | null, connectionId?: string, signal?: AbortSignal) {
     // Keyset scanning bounds each sweep without starving endpoints behind a
     // page whose subscriptions were already confirmed. No provider I/O here.
     const candidates = await db
@@ -579,6 +582,7 @@ export function createTelegramMaintenance(db: Db, options: TelegramMaintenanceOp
           eq(chatEndpoints.status, "active"),
           eq(toolConnections.status, "active"),
           eq(toolConnections.enabled, true),
+          connectionId !== undefined ? eq(chatEndpoints.connectionId, connectionId) : undefined,
           after
             ? gt(chatEndpoints.id, after)
             : undefined,
@@ -587,6 +591,7 @@ export function createTelegramMaintenance(db: Db, options: TelegramMaintenanceOp
       .orderBy(asc(chatEndpoints.id))
       .limit(Math.max(1, Math.min(limit, 100)));
     for (const { endpoint } of candidates) {
+      signal?.throwIfAborted();
       try {
         const record = await endpointRecord(endpoint.id);
         if (
@@ -612,11 +617,29 @@ export function createTelegramMaintenance(db: Db, options: TelegramMaintenanceOp
   }
 
   async function processTelegramSubscriptionDiscovery(signal?: AbortSignal) {
-    let after: string | null = null;
-    do {
-      signal?.throwIfAborted();
-      after = await discoverTelegramSubscriptions(100, after);
-    } while (after !== null);
+    signal?.throwIfAborted();
+    const scoped = pendingDiscovery.entries().next().value;
+    if (scoped) {
+      const [connectionId, request] = scoped;
+      const after = await discoverTelegramSubscriptions(100, request.after, connectionId, signal);
+      // A commit during this page replaces the request and requires a fresh
+      // scoped pass, including changes behind its cursor.
+      if (pendingDiscovery.get(connectionId) === request) {
+        if (after === null) pendingDiscovery.delete(connectionId);
+        else request.after = after;
+      }
+    } else if (startupDiscoveryPending) {
+      startupDiscoveryAfter = await discoverTelegramSubscriptions(100, startupDiscoveryAfter, undefined, signal);
+      startupDiscoveryPending = startupDiscoveryAfter !== null;
+    }
+  }
+
+  function scheduleTelegramSubscriptionDiscovery(connectionId: string) {
+    pendingDiscovery.set(connectionId, { after: null });
+  }
+
+  function hasPendingTelegramSubscriptionDiscovery() {
+    return startupDiscoveryPending || pendingDiscovery.size > 0;
   }
 
   async function processPendingTelegramMaintenance(limit = 25) {
@@ -927,5 +950,5 @@ export function createTelegramMaintenance(db: Db, options: TelegramMaintenanceOp
     await assertCurrent();
     await recordTelegramStopSubscription(endpoint, context, lease);
   }
-  return { stageTelegramMaintenance, processTelegramMaintenance, processPendingTelegramMaintenance, processPendingTelegramActions, processTelegramSubscriptionDiscovery, hasTelegramStopSubscription, recordTelegramStopSubscription };
+  return { stageTelegramMaintenance, processTelegramMaintenance, processPendingTelegramMaintenance, processPendingTelegramActions, processTelegramSubscriptionDiscovery, scheduleTelegramSubscriptionDiscovery, hasPendingTelegramSubscriptionDiscovery, hasTelegramStopSubscription, recordTelegramStopSubscription };
 }

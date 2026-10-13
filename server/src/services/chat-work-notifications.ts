@@ -31,10 +31,10 @@ export async function notifyChatVerificationWork(tx: object): Promise<void> {
   await notifyDeliveryWork(tx, DELIVERY_QUEUES.chatVerification);
 }
 
-export async function notifyChatEndpointWork(tx: object): Promise<void> {
+export async function notifyChatEndpointWork(tx: object, connectionId: string): Promise<void> {
   await notifyChatDeliveryWork(tx);
   await notifyChatPublicationWork(tx);
   for (const queue of Object.values(CHAT_ACTION_QUEUES)) await notifyDeliveryWork(tx, queue);
   await notifyChatVerificationWork(tx);
-  await notifyDeliveryWork(tx, DELIVERY_QUEUES.chatTelegramSubscriptions);
+  await notifyDeliveryWork(tx, DELIVERY_QUEUES.chatTelegramSubscriptions, connectionId);
 }

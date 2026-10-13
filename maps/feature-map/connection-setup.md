@@ -133,7 +133,7 @@ Automated: [setup routing](../../ui/src/pages/apps/chat/ChatEndpointSetup.routin
 cover shared UI logic with fixtures. Provider-specific live setup is not implied.
 
 [Channel integration](../../server/src/__tests__/chat-channels.integration.test.ts)
-also covers Telegram subscription recovery at startup and after committed
+also covers bounded Telegram subscription recovery at startup and after committed
 configuration changes, saved retry deadlines, rollback, and parking pending
 repair while an endpoint or connection is inactive. The provider responses are
 fixtures. Settled maintenance leaves no discovery timer or database scans.
