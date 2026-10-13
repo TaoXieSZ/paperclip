@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { expect, within } from "storybook/test";
+import { saveTaskCollectionPreferences } from "@/lib/task-collection-preferences";
 import type { Issue, IssueLabel, Project } from "@paperclipai/shared";
 import type { RunForIssue } from "@/api/activity";
 import { useQueryClient } from "@tanstack/react-query";
@@ -38,6 +40,7 @@ import { countActiveIssueFilters, defaultIssueFilterState, type IssueFilterState
 import { DEFAULT_INBOX_ISSUE_COLUMNS, type InboxIssueColumn } from "@/lib/inbox";
 import { queryKeys } from "@/lib/queryKeys";
 import {
+  createIssue,
   storybookAgentMap,
   storybookAgents,
   storybookAuthSession,
@@ -938,4 +941,87 @@ export const IssuePropertiesRelationshipBadges: Story = {
 export const IssuePropertiesRelationshipBadgesInline: Story = {
   name: "IssueProperties - relationship badges inline",
   render: () => <IssuePropertiesRelationshipBadgesPane inline />,
+};
+
+
+const creationVisibilityTasks = [
+  createIssue({ id: "visibility-human", identifier: "PAP-1701", title: "Human request", createdByUserId: "user-board", createdByAgentId: null }),
+  createIssue({ id: "visibility-agent", identifier: "PAP-1702", title: "Agent root task", createdByUserId: null, createdByAgentId: "agent-codex" }),
+  createIssue({ id: "visibility-routine", identifier: "PAP-1703", title: "Scheduled routine run", originKind: "routine_execution", createdByUserId: null, createdByAgentId: null, responsibleUserId: "user-board" }),
+  createIssue({ id: "visibility-child", identifier: "PAP-1704", title: "Agent subtask", parentId: "visibility-human", createdByUserId: null, createdByAgentId: "agent-codex" }),
+  createIssue({ id: "visibility-ancestor", identifier: "PAP-1705", title: "Agent ancestor", createdByUserId: null, createdByAgentId: "agent-codex" }),
+  createIssue({ id: "visibility-human-child", identifier: "PAP-1706", title: "Human follow-up", parentId: "visibility-ancestor", createdByUserId: "user-board", createdByAgentId: null }),
+].map((issue) => ({ ...issue, status: "todo" as const, checkoutRunId: null, executionRunId: null, executionAgentNameKey: null, executionLockedAt: null, executionWorkspaceId: null, currentExecutionWorkspace: null, startedAt: null, labelIds: [], labels: [] }));
+
+function CreationVisibilityStory({ included = false }: { included?: boolean }) {
+  const queryClient = useQueryClient();
+  const viewStateKey = `storybook:agent-created-tasks:${included ? "included" : "hidden"}`;
+  useState(() => {
+    hydrateStorybookQueries(queryClient);
+    saveTaskCollectionPreferences({ companyId, collectionKey: viewStateKey, legacyViewStorageKey: `${viewStateKey}:${companyId}` }, {
+      viewState: { ...defaultIssueFilterState, showAgentCreatedTasks: included, viewMode: "list", groupBy: "none", sortField: "updated", sortDir: "desc", nestingEnabled: true, collapsedParents: [], collapsedGroups: [] },
+      columns: ["status", "id", "assignee", "updated"],
+    });
+    const listKey = queryKeys.issues.list(companyId);
+    const ancestor = creationVisibilityTasks.find((issue) => issue.id === "visibility-ancestor")!;
+    queryClient.setQueryData([...listKey, "hierarchy-ancestors", ancestor.id], [ancestor]);
+    for (const id of ["visibility-human", "visibility-human-child"]) {
+      const children = creationVisibilityTasks.filter((issue) => issue.parentId === id);
+      for (const collapsed of [false, true]) {
+        queryClient.setQueryData([...listKey, "hierarchy-children", id, collapsed], children);
+      }
+    }
+    return true;
+  });
+  return (
+    <div className="paperclip-story min-h-screen bg-background p-6 text-foreground">
+      <IssuesList
+        issues={creationVisibilityTasks}
+        agents={storybookAgents}
+        projects={storybookProjects}
+        viewStateKey={viewStateKey}
+        enableAgentCreatedVisibilityFilter
+        searchWithinLoadedIssues
+        rowPresentation="task"
+        toolbarPresentation="collection"
+        onUpdateIssue={() => undefined}
+      />
+    </div>
+  );
+}
+
+export const AgentCreatedTasksHidden: Story = {
+  name: "Agent-created tasks — hidden by default",
+  render: () => <CreationVisibilityStory />,
+  parameters: { docs: { description: { story: "Production task collection with simulated creation metadata and hierarchy reads. Agent and routine roots are hidden; agent subtasks and ancestors remain as context. Server participation and pagination are covered separately." } } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(await canvas.findByText("Human request")).toBeVisible();
+    await expect(canvas.getByText("Agent subtask")).toBeVisible();
+    await expect(canvas.getByText("Agent ancestor")).toBeVisible();
+    await expect(canvas.queryByText("Agent root task")).not.toBeInTheDocument();
+    await expect(canvas.queryByText("Scheduled routine run")).not.toBeInTheDocument();
+  },
+};
+
+export const AgentCreatedTasksIncluded: Story = {
+  name: "Agent-created tasks — explicit opt-in",
+  render: () => <CreationVisibilityStory included />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(await canvas.findByText("Agent root task")).toBeVisible();
+    await expect(canvas.getByText("Scheduled routine run")).toBeVisible();
+  },
+};
+
+export const AgentCreatedTasksFilter: Story = {
+  name: "Agent-created tasks — filter control",
+  render: () => <CreationVisibilityStory />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(await canvas.findByText("Human request")).toBeVisible();
+    canvas.getByTitle("Filter").click();
+    const page = within(canvasElement.ownerDocument.body);
+    await expect(await page.findByRole("checkbox", { name: /Show agent-created tasks/ })).not.toBeChecked();
+  },
 };

@@ -2883,7 +2883,7 @@
       "status": "unreviewed",
       "implementation": "production",
       "boundary": "fixtures",
-      "notes": "Shipped subjects identified through imports and local wrappers; full state, fixture-contract and route parity remain unreviewed. Expanded upstream verification recipes were inspected; the existing fixture scenarios do not prove the added backend handoff, workspace, recovery or authorization contracts. Creation visibility now defaults to hiding automated independent tasks, with a Show agent-created tasks control and inbox participation exceptions. Source alignment reviewed; these fixture stories do not establish live server pagination or authorization.",
+      "notes": "Shipped subjects identified through imports and local wrappers; full state, fixture-contract and route parity remain unreviewed. Expanded upstream verification recipes were inspected; the existing fixture scenarios do not prove the added backend handoff, workspace, recovery or authorization contracts. Creation visibility now defaults to hiding automated independent tasks, with a Show agent-created tasks control and inbox participation exceptions. Source alignment reviewed; these fixture stories do not establish live server pagination or authorization. Focused creation-visibility stories mount the production collection with simulated hierarchy reads and assert hidden roots, opt-in inclusion, and the unchecked filter control.",
       "reviewedAt": "2026-10-13",
       "sources": [
         "maps/feature-map/tasks.md",
@@ -2904,7 +2904,7 @@
         "ui/storybook/fixtures/paperclipData.ts",
         "ui/storybook/stories/tasks/issue-management.stories.tsx"
       ],
-      "fingerprint": "affd36ca8b0a74c36931e21c28b625e46bbc610914069c28c097ce618c140558",
+      "fingerprint": "152aa1c6008f44b615ac5483dceb0cd833f60ffc8df254dd1f161043440bb3ac",
       "stableId": "product-issue-management",
       "sidebarTitle": "Tasks and conversations/Task creation and lifecycle/Product/Issue Management"
     },
