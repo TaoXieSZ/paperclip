@@ -942,6 +942,18 @@ export const IssuePropertiesRelationshipBadgesInline: Story = {
 };
 
 
-export const AgentCreatedTasksHidden: Story = { ...creationVisibilityStories.hidden, name: "Agent-created tasks — hidden by default" };
-export const AgentCreatedTasksIncluded: Story = { ...creationVisibilityStories.included, name: "Agent-created tasks — explicit opt-in" };
-export const AgentCreatedTasksFilter: Story = { ...creationVisibilityStories.filter, name: "Agent-created tasks — filter control" };
+export const AgentCreatedTasksHidden: Story = {
+  ...creationVisibilityStories.hidden,
+  name: "Agent-created tasks — hidden by default",
+  play: creationVisibilityStories.hidden.play,
+};
+export const AgentCreatedTasksIncluded: Story = {
+  ...creationVisibilityStories.included,
+  name: "Agent-created tasks — explicit opt-in",
+  play: creationVisibilityStories.included.play,
+};
+export const AgentCreatedTasksFilter: Story = {
+  ...creationVisibilityStories.filter,
+  name: "Agent-created tasks — filter control",
+  play: creationVisibilityStories.filter.play,
+};

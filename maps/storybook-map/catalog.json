@@ -2905,7 +2905,7 @@
         "ui/storybook/stories/tasks/issue-management.stories.tsx",
         "ui/storybook/support/issue-creation-visibility.tsx"
       ],
-      "fingerprint": "295e5f01cf548b937c06c8776a20ef8b9eec0c189234fca2ec976c3c65cfea2c",
+      "fingerprint": "82da07c22d1bdd0bc0a87dc42363b52bcfec6c8248c7160fe298a374f707957e",
       "stableId": "product-issue-management",
       "sidebarTitle": "Tasks and conversations/Task creation and lifecycle/Product/Issue Management"
     },
