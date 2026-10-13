@@ -1,4 +1,5 @@
 import { chatCredentialMutationLease } from "./chat-credential-mutation-lease.js";
+import { notifyChatEndpointWork } from "./chat-work-notifications.js";
 import { removeSlackRegistration } from "./chat-slack-registration-cleanup.js";
 import { chatEndpoints } from "@paperclipai/db";
 import { AGGREGATOR_NAMES, isAppAggregator, type AggregatorAppsResponse, type ArcadeDiscoverySetupInput } from "@paperclipai/shared/aggregator-apps";
@@ -19047,7 +19048,7 @@ export function toolAccessService(
         ...(input.credentialRefs ?? existing.credentialRefs),
         ...(input.credentialSecretRefs ?? existing.credentialSecretRefs),
       ]);
-      const [row] = await db
+      const write = (database: Db) => database
         .update(toolConnections)
         .set({
           name: input.name ?? existing.name,
@@ -19066,6 +19067,12 @@ export function toolAccessService(
         })
         .where(eq(toolConnections.id, connectionId))
         .returning();
+      const [row] = existing.transport === "chat_sdk"
+        ? await db.transaction(async tx => {
+            await notifyChatEndpointWork(tx);
+            return write(tx as unknown as Db);
+          })
+        : await write(db);
       await syncCredentialBindings(row);
       await ensureRuntimeSlot(row);
       emitConnectionUpdated(row, existing, "api");

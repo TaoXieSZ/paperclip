@@ -449,7 +449,18 @@ Longer polling intervals alone do not complete an item.
   for both stale-claim expiry and any saved retry time. Startup recovers unfinished
   requests. Claim and settlement writes signal in their own short transactions,
   with agent wakeup outside those transactions. Empty and terminal queues disarm.
-  Remaining **1s** maintenance: provider runtimes, Telegram maintenance,
+  Telegram maintenance now has separate commit-driven discovery and action
+  workers. Discovery restores legacy subscription obligations on startup and
+  after endpoint or chat-connection configuration commits, without recurring
+  empty scans. It completes keyset passes so endpoints beyond the first page
+  remain discoverable; failed discovery retains a retry and concurrent changes
+  trigger a fresh pass. Existing action rows provide retry and stale-claim
+  deadlines. Stop-subscription repair parks while the endpoint or connection
+  is inactive; registration and removal keep their existing eligibility.
+  The explicit bounded recovery helper remains available. Provider subscription
+  proof, credential ownership, and idempotent provider mutations stay in the
+  Telegram service. Provider responses are simulated in the PostgreSQL tests.
+  Remaining **1s** maintenance: provider runtimes,
   run milestone/wake-notice projection, GitHub operation
   recovery, and Teams protocol maintenance. GitHub pre-ingress recovery
   must still inspect provider history: a lost callback has no local queue row.

@@ -1,4 +1,5 @@
 import { idleWorkSnapshot } from "../services/task-admission.js";
+import type { Db } from "@paperclipai/db";
 import * as activityLogModule from "../services/activity-log.js";
 import { chatSlackManagerGrants, chatSlackRegistrations, toolOauthStates } from "@paperclipai/db";
 import type { PaperclipCloudConnector, SealedConnectorCredentials } from "../services/paperclip-cloud-connector.js";
@@ -33001,7 +33002,8 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     try {
       for (const kind of Object.keys(CHAT_ACTION_QUEUES) as (keyof typeof CHAT_ACTION_QUEUES)[]) {
         const [action] = await db.insert(chatActions).values({ companyId: f.companyId, endpointId: lane.endpoint.id,
-          kind, providerActionId: randomUUID(), status: "received", updatedAt: at }).returning();
+          kind, providerActionId: randomUUID(), status: "received", updatedAt: at,
+          ...(kind === "telegram_maintenance" ? { payload: { operation: "register_commands" } } : {}) }).returning();
         const set = (status: string, result: Record<string, unknown> = {}) => db.update(chatActions)
           .set({ status, result, updatedAt: at }).where(eq(chatActions.id, action!.id));
         const due = async () => db.select({ id: chatActions.id }).from(chatActions)
@@ -70574,6 +70576,140 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         },
       };
     }
+
+    it.each(["startup", "connection_commit", "rollback", "retry", "stale_claim"] as const)(
+      "recovers Telegram maintenance from committed work and becomes SQL quiet: %s",
+      async mode => {
+        const lane = await draftFixture();
+        const onError = vi.fn();
+        const coordinator = createDeliveryWorkCoordinator({ owner: db, canRun: () => true, onError });
+        const maintenance = () => db.select().from(chatActions).where(and(
+          eq(chatActions.endpointId, lane.endpoint.id), eq(chatActions.kind, "telegram_maintenance"),
+          sql`${chatActions.payload}->>'operation' = 'stop_subscription'`,
+        ));
+        try {
+          await db.delete(chatActions).where(and(eq(chatActions.endpointId, lane.endpoint.id),
+            eq(chatActions.kind, "telegram_stop_subscription")));
+          lane.setSubscriptionInfo({});
+          if (mode === "connection_commit" || mode === "rollback") {
+            await toolAccessService(db).updateConnection(lane.endpoint.connectionId, { enabled: false });
+          }
+          if (mode === "stale_claim") {
+            // Leave committed legacy work behind before starting the workers.
+            await lane.context.service.processTelegramSubscriptionDiscovery();
+            const [action] = await maintenance();
+            expect(action).toBeDefined();
+            await db.update(chatActions).set({ status: "processing", updatedAt: new Date(Date.now() - 120_000) })
+              .where(eq(chatActions.id, action!.id));
+          }
+          let failedAt = 0;
+          let sends = 0;
+          if (mode === "retry") lane.setMaintenanceHook(async method => {
+            if (method === "setWebhook" && sends++ === 0) {
+              failedAt = Date.now();
+              throw new Error("temporary subscription transport outage");
+            }
+            if (method === "setWebhook") expect(Date.now() - failedAt).toBeGreaterThanOrEqual(1000);
+            return undefined;
+          });
+          await registerChatActionWork(coordinator, lane.context.service, () => true).ready;
+          if (mode === "connection_commit" || mode === "rollback") {
+            expect(lane.maintenanceRequests).toEqual([]);
+            if (mode === "rollback") {
+              await expect(db.transaction(async tx => {
+                await toolAccessService(tx as unknown as Db).updateConnection(lane.endpoint.connectionId, { enabled: true });
+                await new Promise(resolve => setTimeout(resolve, 25));
+                expect(lane.maintenanceRequests).toEqual([]);
+                throw new Error("rollback connection wake");
+              })).rejects.toThrow("rollback connection wake");
+              await vi.waitFor(() => {
+                expect(coordinator.nextWakeAt()).toBeNull();
+                expect(idleWorkSnapshot().active).toBe(0);
+              }, { timeout: 10_000 });
+              expect(lane.maintenanceRequests).toEqual([]);
+              expect(await maintenance()).toEqual([]);
+            }
+            await db.transaction(async tx => {
+              await toolAccessService(tx as unknown as Db).updateConnection(lane.endpoint.connectionId, { enabled: true });
+              await new Promise(resolve => setTimeout(resolve, 25));
+              expect(lane.maintenanceRequests).toEqual([]);
+            });
+          }
+          await vi.waitFor(async () => {
+            const actions = await maintenance();
+            expect(actions).toHaveLength(1);
+            expect(actions[0]?.status).toBe("processed");
+            expect(actions[0]?.result.attempts).toBe(mode === "retry" ? 2 : 1);
+            expect(coordinator.nextWakeAt()).toBeNull();
+            expect(idleWorkSnapshot().active).toBe(0);
+          }, { timeout: 10_000 });
+          expect(lane.maintenanceRequests.filter(x => x.method === "setWebhook")).toHaveLength(mode === "retry" ? 2 : 1);
+          expect(await db.select().from(chatActions).where(and(eq(chatActions.endpointId, lane.endpoint.id),
+            eq(chatActions.kind, "telegram_stop_subscription"), eq(chatActions.status, "processed")))).toHaveLength(1);
+          const scans = vi.spyOn(db, "select");
+          try {
+            await new Promise(resolve => setTimeout(resolve, 1200));
+            expect(scans).not.toHaveBeenCalled();
+          } finally { scans.mockRestore(); }
+          expect(onError).not.toHaveBeenCalled();
+        } finally { await coordinator.stop(); await lane.close(); }
+      },
+    );
+
+    it.each(["endpoint", "connection"] as const)("parks pending Telegram subscription repair while its %s is inactive", async inactive => {
+      const lane = await draftFixture();
+      const onError = vi.fn();
+      const coordinator = createDeliveryWorkCoordinator({ owner: db, canRun: () => true, onError });
+      const actions = () => db.select().from(chatActions).where(and(
+        eq(chatActions.endpointId, lane.endpoint.id), eq(chatActions.kind, "telegram_maintenance"),
+        sql`${chatActions.payload}->>'operation' = 'stop_subscription'`,
+      ));
+      try {
+        await db.delete(chatActions).where(and(eq(chatActions.endpointId, lane.endpoint.id),
+          eq(chatActions.kind, "telegram_stop_subscription")));
+        lane.setSubscriptionInfo({});
+        await lane.context.service.processTelegramSubscriptionDiscovery();
+        expect(await actions()).toEqual([expect.objectContaining({ status: "received" })]);
+        if (inactive === "endpoint") {
+          await lane.context.service.configure(lane.endpoint.id, { action: "pause" }, "owner-user");
+        } else {
+          await toolAccessService(db).updateConnection(lane.endpoint.connectionId, { enabled: false });
+        }
+        await registerChatActionWork(coordinator, lane.context.service, () => true).ready;
+        await vi.waitFor(() => {
+          expect(coordinator.nextWakeAt()).toBeNull();
+          expect(idleWorkSnapshot().active).toBe(0);
+        }, { timeout: 10_000 });
+        expect(await lane.context.service.nextChatActionAt("telegram_maintenance")).toBeNull();
+        expect(lane.maintenanceRequests).toEqual([]);
+        expect(await actions()).toEqual([expect.objectContaining({ status: "received" })]);
+        const scans = vi.spyOn(db, "select");
+        try {
+          await new Promise(resolve => setTimeout(resolve, 1200));
+          expect(scans).not.toHaveBeenCalled();
+        } finally { scans.mockRestore(); }
+        if (inactive === "endpoint") {
+          await lane.context.service.configure(lane.endpoint.id, { action: "resume" }, "owner-user");
+        } else {
+          await toolAccessService(db).updateConnection(lane.endpoint.connectionId, { enabled: true });
+        }
+        await vi.waitFor(async () => {
+          const rows = await actions();
+          expect(rows.filter(row => row.status === "processed")).toEqual([
+            expect.objectContaining({ result: expect.objectContaining({ attempts: 1 }) }),
+          ]);
+          // Endpoint pause/resume advances its ownership generation. The old
+          // obligation must settle without touching the provider again.
+          expect(rows.filter(row => row.status !== "processed")).toEqual(inactive === "endpoint" ? [
+            expect.objectContaining({ status: "cancelled", result: expect.objectContaining({ code: "telegram_maintenance_credentials_superseded" }) }),
+          ] : []);
+          expect(coordinator.nextWakeAt()).toBeNull();
+          expect(idleWorkSnapshot().active).toBe(0);
+        }, { timeout: 10_000 });
+        expect(lane.maintenanceRequests.filter(x => x.method === "setWebhook")).toHaveLength(1);
+        expect(onError).not.toHaveBeenCalled();
+      } finally { await coordinator.stop(); await lane.close(); }
+    });
 
     it("durably stops during the first draft RPC without cancelling a run, and never reuses its ID after restart", async () => {
       const lane = await draftFixture();

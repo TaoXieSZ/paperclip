@@ -181,6 +181,14 @@ own policy and access review.
 
 Gaps: Provider endpoint, represented agent and linked sender are operator choices today.
 
+Internal recovery: Telegram discovery runs at startup and after configuration
+commits; durable maintenance rows supply retry deadlines. Inactive subscription
+repair is parked until an endpoint or connection change. This creates no agent
+management permission or new API. Local database-backed provider-fixture tests in
+[channel integration](../../server/src/__tests__/chat-channels.integration.test.ts)
+cover recovery, rollback, retries and idle query silence; they do not establish
+live provider or agent access.
+
 ## `failure`
 
 Review: `baseline`.

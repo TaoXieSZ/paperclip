@@ -132,6 +132,12 @@ Automated: [setup routing](../../ui/src/pages/apps/chat/ChatEndpointSetup.routin
 [identity confirmation](../../ui/src/pages/apps/chat/ChatIdentityConfirm.test.tsx)
 cover shared UI logic with fixtures. Provider-specific live setup is not implied.
 
+[Channel integration](../../server/src/__tests__/chat-channels.integration.test.ts)
+also covers Telegram subscription recovery at startup and after committed
+configuration changes, saved retry deadlines, rollback, and parking pending
+repair while an endpoint or connection is inactive. The provider responses are
+fixtures. Settled maintenance leaves no discovery timer or database scans.
+
 Manual: complete setup for one named provider, reload endpoint settings, link
 the intended sender, and send a disposable message. Verify one task and a useful
 reply in the originating conversation. Inspect an unlinked sender's denial and
