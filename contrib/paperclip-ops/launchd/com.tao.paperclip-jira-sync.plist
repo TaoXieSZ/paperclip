@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PAPERCLIP_COMPANY_ID</key>
+		<string>c274b8b3-80ea-4835-9bc9-9b3da27fce80</string>
+		<key>SYNC_DONE_JQL</key>
+		<string>project = LUOB AND assignee = currentUser() AND resolution != Unresolved AND updated &gt;= -14d</string>
+		<key>SYNC_JQL</key>
+		<string>project = LUOB AND assignee = currentUser() AND resolution = Unresolved AND updated &gt;= -120d ORDER BY updated DESC</string>
+	</dict>
+	<key>Label</key>
+	<string>com.tao.paperclip-jira-sync</string>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/python3</string>
+		<string>/Users/txie/scripts/paperclip-jira-sync.py</string>
+		<string>sync</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Users/txie/.paperclip-jira-sync/logs/sync.err.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/txie/.paperclip-jira-sync/logs/sync.out.log</string>
+	<key>StartInterval</key>
+	<integer>900</integer>
+	<key>WorkingDirectory</key>
+	<string>/Users/txie</string>
+</dict>
+</plist>

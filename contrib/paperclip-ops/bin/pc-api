@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""Minimal paperclip API client for the local instance.
+
+Usage: pc-api METHOD /api/path [json-body] [--full]
+Prints compact JSON (trimmed to 4KB unless --full).
+"""
+import json
+import os
+import sys
+import urllib.request
+import urllib.error
+
+BASE = os.environ.get("PAPERCLIP_API_URL", "http://127.0.0.1:3100").rstrip("/")
+
+
+def main() -> int:
+    args = [a for a in sys.argv[1:] if a != "--full"]
+    full = len(args) != len(sys.argv) - 1
+    if len(args) < 2:
+        print(__doc__)
+        return 64
+    method, path = args[0].upper(), args[1]
+    body = json.loads(args[2]) if len(args) > 2 else None
+    data = None if body is None else json.dumps(body).encode()
+    headers = {"Accept": "application/json"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    key = os.environ.get("PAPERCLIP_API_KEY")
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    req = urllib.request.Request(BASE + path, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            raw = r.read().decode()
+            code = r.status
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode()
+        print(f"HTTP {e.code}: {raw[:400]}")
+        return 1
+    try:
+        out = json.dumps(json.loads(raw), ensure_ascii=False, indent=1)
+    except ValueError:
+        out = raw
+    print(f"HTTP {code}")
+    print(out if full else out[:4096])
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
