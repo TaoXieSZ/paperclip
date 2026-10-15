@@ -44,6 +44,9 @@ export type OfficeAttention = {
   title: string | null;
   href: string | null;
   whyNow: string;
+  interactionId: string | null;
+  issueId: string | null;
+  kind: string | null;
 };
 
 export type OfficeModel = {
@@ -90,6 +93,10 @@ export type OfficeAttentionInput = {
       id?: string | null;
       title?: string | null;
       href?: string | null;
+      metadata?: {
+        kind?: string | null;
+        issueId?: string | null;
+      } | null;
     } | null;
   }>;
 };
@@ -145,6 +152,9 @@ function attentionOf(feed: OfficeAttentionInput | null | undefined): OfficeAtten
     title: item.subject?.title ?? null,
     href: item.subject?.href ?? null,
     whyNow: item.whyNow ?? "",
+    interactionId: item.subject?.id ?? null,
+    issueId: item.subject?.metadata?.issueId ?? null,
+    kind: item.subject?.metadata?.kind ?? null,
   }));
 }
 
