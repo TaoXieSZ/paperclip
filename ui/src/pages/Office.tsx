@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { Agent, Issue } from "@paperclipai/shared";
 import { agentsApi } from "../api/agents";
 import { attentionApi } from "../api/attention";
@@ -43,6 +43,15 @@ const OFFICE_CSS = `
 .office-root .podium .item .t { font-size: 14px; font-weight: 600; color: #18181b; }
 .office-root .podium .item .w { font-size: 12px; color: #71717a; margin-top: 2px; }
 .office-root .podium .item .go { margin-left: auto; flex: none; color: #b91c1c; font-size: 12px; font-weight: 600; }
+.office-root .podium .acts { margin-left: auto; flex: none; display: flex; align-items: center; gap: 8px; }
+.office-root .podium .acts button { font-size: 12px; font-weight: 600; border-radius: 7px; padding: 4px 12px; cursor: pointer; font-family: inherit; }
+.office-root .podium .acts .ok { background: #16a34a; color: #fff; border: 1px solid #15803d; }
+.office-root .podium .acts .ok:hover { background: #15803d; }
+.office-root .podium .acts .no { background: #fff; color: #b91c1c; border: 1px solid #fca5a5; }
+.office-root .podium .acts .no:hover { background: #fef2f2; }
+.office-root .podium .acts button:disabled { opacity: .5; cursor: default; }
+.office-root .podium .acts .reasoninput { font-size: 12px; padding: 4px 8px; border: 1px solid #fca5a5; border-radius: 7px; font-family: inherit; width: 180px; }
+.office-root .podium .decided { margin-left: auto; flex: none; color: #15803d; font-size: 12px; font-weight: 600; }
 .office-root .notifybtn { font-size: 12px; color: #71717a; border: 1px solid #e4e4e7; border-radius: 7px; padding: 4px 9px; background: #fff; cursor: pointer; font-family: inherit; }
 .office-root .notifybtn:hover { background: #f4f4f5; }
 .office-root .dot { width: 8px; height: 8px; border-radius: 50%; background: #16a34a; }
@@ -312,6 +321,11 @@ export function Office() {
   const [now, setNow] = useState(() => Date.now());
   const [openKids, setOpenKids] = useState<ReadonlySet<string>>(() => new Set());
   const [notifyVisible, setNotifyVisible] = useState(false);
+  const [decisionBusy, setDecisionBusy] = useState<string | null>(null);
+  const [rejectingKey, setRejectingKey] = useState<string | null>(null);
+  const [rejectReason, setRejectReason] = useState("");
+  const [decidedKeys, setDecidedKeys] = useState<ReadonlySet<string>>(() => new Set());
+  const queryClient = useQueryClient();
 
   const liveRunsQueryKey = queryKeys.liveRuns(selectedCompanyId!);
   const sharedLiveRuns = useSharedPollingQuery({
@@ -380,6 +394,24 @@ export function Office() {
   const liveCount = model.meetings.filter((meeting) => meeting.state === "live").length;
   const active = model.meetings.filter((meeting) => meeting.state !== "done");
   const done = model.meetings.filter((meeting) => meeting.state === "done");
+  async function decide(a: OfficeAttention, verdict: "accept" | "reject", reason?: string) {
+    if (!a.issueId || !a.interactionId) return;
+    setDecisionBusy(a.key + verdict);
+    try {
+      if (verdict === "accept") {
+        await issuesApi.acceptInteraction(a.issueId, a.interactionId, {});
+      } else {
+        await issuesApi.rejectInteraction(a.issueId, a.interactionId, reason);
+      }
+      setDecidedKeys((prev) => new Set(prev).add(a.key));
+      await queryClient.invalidateQueries({ queryKey: queryKeys.attention(selectedCompanyId!) });
+    } finally {
+      setDecisionBusy(null);
+      setRejectingKey(null);
+      setRejectReason("");
+    }
+  }
+
   const error = liveRunsQuery.error ?? issuesQuery.error ?? agentsQuery.error ?? attentionQuery.error;
   const updatedAt = Math.max(
     liveRunsQuery.dataUpdatedAt || 0,
@@ -437,30 +469,77 @@ export function Office() {
         {attention.length ? (
           <div className="podium">
             <h3>等你拍板 ({attention.length})</h3>
-            {attention.map((a) => (
-              <div
-                key={a.key}
-                className="item"
-                role="button"
-                tabIndex={0}
-                onClick={() => {
-                  if (!a.href) return;
-                  if (a.href.startsWith("/")) navigate(a.href);
-                  else window.open(a.href, "_blank", "noopener");
-                }}
-                onKeyDown={(e) => {
-                  if (e.key !== "Enter" || !a.href) return;
-                  if (a.href.startsWith("/")) navigate(a.href);
-                  else window.open(a.href, "_blank", "noopener");
-                }}
-              >
-                <div>
-                  <div className="t">{a.title ?? "(无标题)"}</div>
-                  {a.whyNow ? <div className="w">{a.whyNow}</div> : null}
+            {attention.map((a) => {
+              const decided = decidedKeys.has(a.key);
+              const canDecide = !decided && a.kind === "request_confirmation" && a.issueId && a.interactionId;
+              const busy = decisionBusy === a.key + "accept" || decisionBusy === a.key + "reject";
+              return (
+                <div
+                  key={a.key}
+                  className="item"
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => {
+                    if (!a.href) return;
+                    if (a.href.startsWith("/")) navigate(a.href);
+                    else window.open(a.href, "_blank", "noopener");
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key !== "Enter" || !a.href) return;
+                    if (a.href.startsWith("/")) navigate(a.href);
+                    else window.open(a.href, "_blank", "noopener");
+                  }}
+                >
+                  <div>
+                    <div className="t">{a.title ?? "(无标题)"}</div>
+                    {a.whyNow ? <div className="w">{a.whyNow}</div> : null}
+                  </div>
+                  {decided ? <span className="decided">已拍板 ✓</span> : null}
+                  {canDecide ? (
+                    <span className="acts" onClick={(e) => e.stopPropagation()}>
+                      {rejectingKey === a.key ? (
+                        <>
+                          <input
+                            className="reasoninput"
+                            placeholder="拒绝原因(可空)"
+                            value={rejectReason}
+                            onChange={(e) => setRejectReason(e.target.value)}
+                          />
+                          <button
+                            type="button"
+                            className="no"
+                            disabled={busy}
+                            onClick={() => void decide(a, "reject", rejectReason.trim() || undefined)}
+                          >
+                            确认拒绝
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            className="ok"
+                            disabled={busy}
+                            onClick={() => void decide(a, "accept")}
+                          >
+                            接受
+                          </button>
+                          <button
+                            type="button"
+                            className="no"
+                            disabled={busy}
+                            onClick={() => { setRejectingKey(a.key); setRejectReason(""); }}
+                          >
+                            拒绝
+                          </button>
+                        </>
+                      )}
+                    </span>
+                  ) : null}
+                  {!decided && !canDecide ? <span className="go">去拍板 →</span> : null}
                 </div>
-                <span className="go">去拍板 →</span>
-              </div>
-            ))}
+              );
+            })}
           </div>
         ) : null}
         {active.length === 0 ? <div className="empty">会议室空着,现在没有议题</div> : null}
