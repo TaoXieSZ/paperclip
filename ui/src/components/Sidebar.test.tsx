@@ -20,8 +20,8 @@ const mockInstanceSettingsApi = vi.hoisted(() => ({
   getExperimental: vi.fn(),
 }));
 
-vi.mock("@/lib/router", () => ({
-  NavLink: ({ to, children, className, ...props }: {
+vi.mock("@/lib/router", () => {
+  const Anchor = ({ to, children, className, ...props }: {
     to: string;
     children: ReactNode;
     className?: string | ((state: { isActive: boolean }) => string);
@@ -33,8 +33,9 @@ vi.mock("@/lib/router", () => ({
     >
       {children}
     </a>
-  ),
-}));
+  );
+  return { NavLink: Anchor, Link: Anchor };
+});
 
 vi.mock("../context/DialogContext", () => ({
   useDialog: () => ({
@@ -191,6 +192,9 @@ describe("Sidebar", () => {
     const navSearchLink = [...container.querySelectorAll("nav a")]
       .find((anchor) => anchor.textContent?.trim() === "Search");
     expect(navSearchLink?.getAttribute("href")).toBe("/search");
+    const officeLink = [...container.querySelectorAll("nav a")]
+      .find((anchor) => anchor.textContent?.trim() === "Office");
+    expect(officeLink?.getAttribute("href")).toBe("/office");
 
     flushSync(() => {
       root.unmount();

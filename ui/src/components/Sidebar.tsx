@@ -21,6 +21,7 @@ import {
   MessageCircle,
   GanttChartSquare,
   LayoutGrid,
+  Presentation,
   Users,
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
@@ -44,6 +45,7 @@ import { useInboxBadge } from "../hooks/useInboxBadge";
 import { useStreamlinedUiEnabled } from "../hooks/useStreamlinedUiEnabled";
 import { usePublishSharedQueryData, useSharedPollingQuery } from "../hooks/useSharedPolling";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { Link } from "@/lib/router";
 import { cn, SIDEBAR_RAIL_HIDDEN_LABEL } from "../lib/utils";
 import { PluginSlotOutlet } from "@/plugins/slots";
 import { PluginLauncherOutlet } from "@/plugins/launchers";
@@ -130,8 +132,17 @@ export function Sidebar({ children }: { children?: ReactNode }) {
           the header's spare width goes to the workspace/organization name,
           which is the user's orientation anchor and truncates otherwise.
           Search is the first nav item below instead. */}
-      <div className="flex h-(--sz-60px) shrink-0 items-center gap-1 px-3">
-        <SidebarCompanyMenu />
+      <div className="shrink-0">
+        {rail ? null : (
+          <div className="flex items-center px-3 pt-2">
+            <Link to="/office" aria-label="Office" className="inline-flex">
+              <img src="/brands/roblox-wordmark.png" alt="Roblox" className="h-6 w-auto" />
+            </Link>
+          </div>
+        )}
+        <div className="flex h-(--sz-60px) shrink-0 items-center gap-1 px-3">
+          <SidebarCompanyMenu />
+        </div>
       </div>
 
       <nav className={primarySidebarStyles.nav}>
@@ -166,6 +177,7 @@ export function Sidebar({ children }: { children?: ReactNode }) {
               Cmd/Ctrl+K remains the keyboard path (command palette). */}
           <SidebarNavItem to="/search" label="Search" icon={Search} />
           <SidebarNavItem to="/dashboard" label="Dashboard" icon={LayoutDashboard} liveCount={liveRunCount} />
+          <SidebarNavItem to="/office" label="Office" icon={Presentation} />
           <SidebarNavItem
             to="/inbox"
             label="Inbox"

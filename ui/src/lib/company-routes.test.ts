@@ -120,6 +120,13 @@ describe("company routes", () => {
     expect(extractCompanyPrefixFromPath("/attention")).toBe("ATTENTION");
   });
 
+  it("treats /office as a board route that needs a company prefix", () => {
+    expect(isBoardPathWithoutPrefix("/office")).toBe(true);
+    expect(extractCompanyPrefixFromPath("/office")).toBeNull();
+    expect(applyCompanyPrefix("/office", "PAP")).toBe("/PAP/office");
+    expect(toCompanyRelativePath("/PAP/office")).toBe("/office");
+  });
+
   it("treats /timeline as a board route that needs a company prefix", () => {
     expect(isBoardPathWithoutPrefix("/timeline")).toBe(true);
     expect(extractCompanyPrefixFromPath("/timeline")).toBeNull();

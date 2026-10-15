@@ -96,7 +96,7 @@
   --file-tree-indent-step: calc(var(--spacing) * 6);
   --file-tree-indent-max: 40%;
   --radius: 0.5rem;
-  --background: oklch(1 0 0);
+  --background: #f3f1ed;
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.145 0 0);
