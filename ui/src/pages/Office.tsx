@@ -36,6 +36,13 @@ const OFFICE_CSS = `
 .office-root .attnchip { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; color: #b91c1c; border: 2px solid #fecaca; border-radius: 8px; padding: 5px 12px; background: #fef2f2; cursor: pointer; font-family: inherit; }
 .office-root .attnchip:hover { background: #fee2e2; }
 .office-root .attnchip .dot { background: #dc2626; }
+.office-root .podium { grid-column: 1/-1; border: 2px solid #fecaca; background: #fef2f2; border-radius: 16px; padding: 14px 18px; }
+.office-root .podium h3 { margin: 0; font-size: 12px; font-weight: 600; color: #b91c1c; letter-spacing: .05em; }
+.office-root .podium .item { display: flex; align-items: center; gap: 10px; background: #fff; border: 1px solid #fecaca; border-radius: 10px; padding: 10px 14px; cursor: pointer; margin-top: 10px; }
+.office-root .podium .item:hover { border-color: #fca5a5; box-shadow: 0 1px 4px rgba(185, 28, 28, .12); }
+.office-root .podium .item .t { font-size: 14px; font-weight: 600; color: #18181b; }
+.office-root .podium .item .w { font-size: 12px; color: #71717a; margin-top: 2px; }
+.office-root .podium .item .go { margin-left: auto; flex: none; color: #b91c1c; font-size: 12px; font-weight: 600; }
 .office-root .notifybtn { font-size: 12px; color: #71717a; border: 1px solid #e4e4e7; border-radius: 7px; padding: 4px 9px; background: #fff; cursor: pointer; font-family: inherit; }
 .office-root .notifybtn:hover { background: #f4f4f5; }
 .office-root .dot { width: 8px; height: 8px; border-radius: 50%; background: #16a34a; }
@@ -427,6 +434,35 @@ export function Office() {
         <span className="updated">{updatedLabel}</span>
       </div>
       <div className="floor">
+        {attention.length ? (
+          <div className="podium">
+            <h3>等你拍板 ({attention.length})</h3>
+            {attention.map((a) => (
+              <div
+                key={a.key}
+                className="item"
+                role="button"
+                tabIndex={0}
+                onClick={() => {
+                  if (!a.href) return;
+                  if (a.href.startsWith("/")) navigate(a.href);
+                  else window.open(a.href, "_blank", "noopener");
+                }}
+                onKeyDown={(e) => {
+                  if (e.key !== "Enter" || !a.href) return;
+                  if (a.href.startsWith("/")) navigate(a.href);
+                  else window.open(a.href, "_blank", "noopener");
+                }}
+              >
+                <div>
+                  <div className="t">{a.title ?? "(无标题)"}</div>
+                  {a.whyNow ? <div className="w">{a.whyNow}</div> : null}
+                </div>
+                <span className="go">去拍板 →</span>
+              </div>
+            ))}
+          </div>
+        ) : null}
         {active.length === 0 ? <div className="empty">会议室空着,现在没有议题</div> : null}
         {active.map((meeting) => (
           <MeetingTable
