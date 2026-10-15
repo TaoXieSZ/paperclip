@@ -105,7 +105,7 @@
   --composer-effort-press-scale: 1.16;
   --composer-effort-halo: 0 0 0 calc(var(--spacing) * 1.5) color-mix(in oklab, var(--tc-mode-ask) 14%, transparent);
   --radius: 0.5rem;
-  --background: oklch(1 0 0);
+  --background: #f3f1ed;
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.145 0 0);
