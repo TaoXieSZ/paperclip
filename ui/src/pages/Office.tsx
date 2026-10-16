@@ -139,7 +139,6 @@ function readSeen(): string[] {
 function notifyNew(items: OfficeAttention[], companyPrefix: string | null) {
   const keys = items.map((item) => item.key);
   if (typeof Notification === "undefined" || Notification.permission !== "granted") {
-    localStorage.setItem(SEEN_KEY, JSON.stringify(keys));
     return;
   }
   const seen = new Set(readSeen());
