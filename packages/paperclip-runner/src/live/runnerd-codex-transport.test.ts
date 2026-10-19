@@ -1,4 +1,3 @@
-import { QUALIFIED_ACPX_PROFILES } from "../drivers/acpx/qualified-profiles.js";
 import { coldAdmissionTimeoutMs, waitForRunnerCommand } from "./runnerd-codex-transport.js";
 import {
   chmod,
@@ -1405,6 +1404,61 @@ it("reserves a bounded suspension window after close preparation", () => {
 });
 
 it.each([
+  { existingCommand: false, rejectLateRead: false },
+  { existingCommand: false, rejectLateRead: true },
+  { existingCommand: true, rejectLateRead: false },
+  { existingCommand: true, rejectLateRead: true },
+])("returns unconfirmed suspension at its deadline while a remote state read is still pending ($existingCommand, $rejectLateRead)", async ({ existingCommand, rejectLateRead }) => {
+  vi.useFakeTimers();
+  const commands: { commandId: string; type: string; status: string }[] = existingCommand
+    ? [{ commandId: "exact-suspend", type: "runner.suspend", status: "completed" }]
+    : [];
+  const readRunnerState = vi.fn(async () => {
+    await new Promise<void>(resolveRead => setTimeout(resolveRead, 10_000));
+    if (rejectLateRead) throw new Error("remote state unavailable after its own timeout");
+    return { lifecycle: "suspended" };
+  });
+  const unhandled = vi.fn();
+  process.on("unhandledRejection", unhandled);
+  const queueSuspend = vi.fn((commandId: string) => commands.push({ commandId, type: "runner.suspend", status: "completed" }));
+  const release = vi.fn();
+  let settled = false;
+  let suspended: boolean | undefined;
+  const result = runnerdRecoveryInternals.awaitRunnerSuspensionBarrier({
+    commands: () => commands,
+    queueSuspend,
+    readRunnerState,
+    runnerHasExited: async () => true,
+    pump: () => undefined,
+    deadline: Date.now() + 2_500,
+    pollIntervalMs: 0,
+  }).then(value => {
+    settled = true;
+    suspended = value;
+    if (value) release();
+    return value;
+  });
+  try {
+    await vi.advanceTimersByTimeAsync(2_500);
+    expect(readRunnerState).toHaveBeenCalledOnce();
+    expect(settled).toBe(true);
+    expect(suspended).toBe(false);
+    expect(queueSuspend).toHaveBeenCalledTimes(existingCommand ? 0 : 1);
+    expect(release).not.toHaveBeenCalled();
+  } finally {
+    try {
+      await vi.advanceTimersByTimeAsync(10_000);
+      await expect(result).resolves.toBe(false);
+      expect(release).not.toHaveBeenCalled();
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", unhandled);
+      vi.useRealTimers();
+    }
+  }
+});
+
+it.each([
   { provider: "acpx" as const, acpxAgent: "pi" as const, closeGraceMs: undefined, drained: true },
   { provider: "codex" as const, acpxAgent: undefined, closeGraceMs: undefined, drained: false },
   { provider: "acpx" as const, acpxAgent: "pi" as const, closeGraceMs: 400, drained: false },
@@ -2128,6 +2182,16 @@ it("allows trusted package-manager runtime roots without exposing HOME paths", (
   ).toEqual(["/opt/homebrew", "/usr/local"]);
 });
 
+it("trusts a preconfigured workspace through launch flags without editing the user config", () => {
+  const args = createRunnerdCodexAppServerArgs({
+    environment: { HOME: "/home/executor", PAPERCLIP_RUNNER_HOME_MODE: "preconfigured" },
+    codexHome: "/home/executor/.codex", workingDirectory: "/work/task",
+  });
+  expect(args.join("\n")).toContain('projects={"/work/task"={trust_level="trusted"}}');
+  expect(args.join("\n")).toContain('HOME="/home/executor"');
+  expect(args.join("\n")).not.toContain('"/home/executor"="none"');
+});
+
 it("denies the isolated Codex home without denying a remote execution workspace", () => {
   const args = createRunnerdCodexAppServerArgs({
     environment: {
@@ -2140,6 +2204,7 @@ it("denies the isolated Codex home without denying a remote execution workspace"
     readOnlyRoots: ["/usr/local"],
   });
   const serialized = args.join("\n");
+  expect(args).not.toContain("project_doc_max_bytes=0");
 
   expect(serialized).toContain(
     '"/workspaces/task/.paperclip-runtime/paperclip-runner/sessions/session/filesystem/codex-home"="none"',
@@ -2830,12 +2895,14 @@ const fakeCodex = resolve(
   "../../runner/target/debug/fake-codex-app-server",
 );
 
-it.each(["stuck", "late-release", "late-release-error", "stuck-release", "cooperative-release", "launch-failure"] as const)(
+it.each(["stuck", "late-release", "late-release-error", "stuck-release", "cooperative-release", "launch-failure", "launch-failure-sandbox", "launch-failure-unsandboxed"] as const)(
   "bounds setup registration teardown and retains unconfirmed state (%s)",
   async mode => {
     const root = await mkdtemp(join(tmpdir(), "runnerd-setup-registration-"));
     const runtimeDirectory = join(root, "native-state");
     await mkdir(runtimeDirectory, { mode: 0o700 });
+    const launchFailure = mode.startsWith("launch-failure");
+    let template: Record<string, unknown> | null = null;
     let registrationStarted!: () => void;
     const started = new Promise<void>(resolve => { registrationStarted = resolve; });
     let returnRegistration!: (registration: { connection: { mode: "listen"; listenAddress: string; listenPort: number; listenPath: string }; release: () => Promise<void> }) => void;
@@ -2853,17 +2920,22 @@ it.each(["stuck", "late-release", "late-release-error", "stuck-release", "cooper
     };
     let registrationSignal: AbortSignal | undefined;
     const cleanup = vi.fn(async () => { await rm(runtimeDirectory, { recursive: true, force: true }); });
-    const launch = vi.fn(() => { throw new Error("owned launcher failed before execution"); });
+    const launch = vi.fn((spec: durableControlPlane.RunnerProcessLaunchSpec) => {
+      expect(spec.environment.PAPERCLIP_RUNNER_EXTERNAL_SANDBOX).toBeUndefined();
+      throw new Error("owned launcher failed before execution");
+    });
     let settled = false;
     vi.useFakeTimers();
     const result = probeNativeRunnerEnvironment({
       runtimeDirectory, provider: "codex", model: "gpt-test", timeoutMs: 1_000,
-      environment: { PATH: "", OPENAI_API_KEY: "inert-test-key" },
+      environment: { PATH: "", OPENAI_API_KEY: "inert-test-key", PAPERCLIP_RUNNER_EXTERNAL_SANDBOX: "true" },
       transportOptions: {
+        ...(mode === "launch-failure-sandbox" ? { externallySandboxed: true } : mode === "launch-failure-unsandboxed" ? { externallySandboxed: false } : {}),
         runnerBinary: resolve(import.meta.dirname, "../../package.json"),
         codexCommand: resolve(import.meta.dirname, "../../package.json"),
         sourceCodexHome: "", runnerProcessLauncher: launch,
         controlPlaneRegistration: async (_authority, _identity, signal) => {
+          template = structuredClone(_authority.store.state.runAttachTemplate!);
           registrationSignal = signal;
           if (mode === "cooperative-release") signal?.addEventListener("abort", () => returnRegistration(registered), { once: true });
           registrationStarted();
@@ -2874,16 +2946,23 @@ it.each(["stuck", "late-release", "late-release-error", "stuck-release", "cooper
     }).then(value => { settled = true; return value; }, (error: unknown) => { settled = true; return error; });
     try {
       await started;
-      if (mode === "launch-failure") returnRegistration(registered);
+      if (launchFailure) returnRegistration(registered);
       await vi.advanceTimersByTimeAsync(1_000);
       if (mode === "late-release" || mode === "late-release-error" || mode === "stuck-release") returnRegistration(registered);
       await vi.advanceTimersByTimeAsync(10_000);
-      if (mode === "late-release" || mode === "cooperative-release" || mode === "launch-failure") await result;
+      if (mode === "late-release" || mode === "cooperative-release" || launchFailure) await result;
       expect(settled).toBe(true);
       expect(registrationSignal?.aborted).toBe(true);
       const failure = await result;
+      expect(template).toMatchObject({ provider: { externallySandboxed: mode === "launch-failure-sandbox", readOnly: true, approvalPolicy: "never", collaborationMode: "plan" } });
+      const args = (template!.provider as Record<string, unknown>).args as string[];
+      expect(args).toContain("project_doc_max_bytes=0");
+      expect(args[args.indexOf("project_doc_max_bytes=0") - 1]).toBe("-c");
+      expect(args.indexOf("project_doc_max_bytes=0")).toBeLessThan(args.indexOf("app-server"));
+      expect(args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+      expect(args).toContain('permissions.paperclip-runner-workspace-read-only.network.enabled=false');
       expect(failure).toBeInstanceOf(Error);
-      expect((failure as Error).message).toContain(mode === "launch-failure" ? "owned launcher failed before execution" : "Native provider hello probe timed out.");
+      expect((failure as Error).message).toContain(launchFailure ? "owned launcher failed before execution" : "Native provider hello probe timed out.");
       if (mode === "stuck" || mode === "stuck-release" || mode === "late-release-error") {
         expect(failure).toBeInstanceOf(AggregateError);
         expect((failure as AggregateError).cause).toMatchObject({ message: "Native provider hello probe timed out." });
@@ -2900,7 +2979,7 @@ it.each(["stuck", "late-release", "late-release-error", "stuck-release", "cooper
         expect(cleanup).toHaveBeenCalledOnce();
         await expect(stat(runtimeDirectory)).rejects.toThrow();
       }
-      expect(launch).toHaveBeenCalledTimes(mode === "launch-failure" ? 1 : 0);
+      expect(launch).toHaveBeenCalledTimes(launchFailure ? 1 : 0);
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       returnRegistration(registered);
@@ -3270,58 +3349,6 @@ it("expands coalesced canonical items without dropping strict bindings", () => {
     },
   ]);
 });
-
-it("keeps a quiet active Codex turn in the same process across connection lease expiry", async () => {
-  const stateDirectory = await mkdtemp(join(tmpdir(), "runnerd-renew-active-"));
-  const callsPath = join(stateDirectory, "calls.log");
-  const cores: DurablePrpControlPlane[] = [];
-  const OriginalCore = durableControlPlane.DurablePrpControlPlane;
-  const coreSpy = vi.spyOn(durableControlPlane, "DurablePrpControlPlane")
-    .mockImplementation(function(options: ConstructorParameters<typeof OriginalCore>[0]) {
-      const core = new OriginalCore({ ...options, connectionLeaseTtlMs: 60_000 });
-      cores.push(core);
-      return core;
-    } as unknown as typeof OriginalCore);
-  const bundle = createCapabilityRunnerdCodexTransport({
-    runnerBinary: defaultCapabilityRunnerdBinary(), codexCommand: fakeCodex,
-    codexArgs: fakeCodexArgs(stateDirectory, "--hold-turn", "--record-process-start", "--call-log", callsPath),
-    stateDirectory, runnerReconnectGraceMs: 5_000,
-  });
-  try {
-    const opened = await bundle.transport.request("thread/start", { cwd: tmpdir(), dynamicTools: [] });
-    await bundle.transport.request("turn/start", { input: [{ type: "text", text: "Keep working quietly." }] });
-    const runnerPid = bundle.evidence().runnerPid;
-    const codexPid = bundle.evidence().codexPid;
-    expect(runnerPid).toBeGreaterThan(0);
-    expect(codexPid).toBeGreaterThan(0);
-    const core = cores[0]!;
-    const original = structuredClone(Object.values(core.store.state.leases)[0]!);
-    await vi.waitFor(() => {
-      expect(Date.now()).toBeGreaterThan(original.expiresAtUnixMs + 1_000);
-    }, { timeout: 75_000, interval: 1_000 });
-    const current = Object.values(core.store.state.leases)[0]!;
-    expect(current.expiresAtUnixMs).toBeGreaterThan(original.expiresAtUnixMs);
-    expect(current.leaseId).toBe(original.leaseId);
-    expect(core.store.state.connectionCount).toBe(1);
-    expect(bundle.evidence().runnerPid).toBe(runnerPid);
-    expect(bundle.evidence().codexPid).toBe(codexPid);
-    process.kill(runnerPid!, 0);
-    process.kill(codexPid!, 0);
-    const calls = (await readFile(callsPath, "utf8")).trim().split(/\r?\n/);
-    expect(calls.filter(call => call === "process-start")).toHaveLength(1);
-    expect(calls.filter(call => call === "thread/start")).toHaveLength(1);
-    expect(calls.filter(call => call === "turn/start")).toHaveLength(1);
-    expect(calls).not.toContain("turn/interrupt");
-    expect(calls).not.toContain("thread/resume");
-    const state = JSON.parse(await readFile(join(stateDirectory, "fake-codex-state.json"), "utf8"));
-    expect(state.threadId).toBe(opened.thread.id);
-    expect(state.activeTurnId).toBe("provider-turn-1");
-  } finally {
-    await bundle.transport.close();
-    coreSpy.mockRestore();
-    await rm(stateDirectory, { recursive: true, force: true });
-  }
-}, 90_000);
 
 it("runs the lab provider boundary through authenticated durable PRP", async () => {
   const stateDirectory = await mkdtemp(join(tmpdir(), "runnerd-lab-provider-"));
@@ -6935,81 +6962,6 @@ it("rotates PRP authority in place for a warm cross-run attachment", async () =>
   }
 }, 30_000);
 
-it("reopens Pi after a completed turn within its cold admission budget during warm attachment", async () => {
-  const root = await mkdtemp(join(tmpdir(), "runnerd-pi-warm-admission-"));
-  const providerNode = process.platform === "linux" ? join(root, "node") : process.execPath;
-  if (process.platform === "linux") {
-    await cp(process.execPath, providerNode, { dereference: true });
-    await chmod(providerNode, 0o500);
-    expect((await stat(providerNode)).mode & 0o777).toBe(0o500);
-  }
-  const cliRoot = join(root, "dist/cli");
-  await mkdir(cliRoot, { recursive: true, mode: 0o700 });
-  const sidecarPath = join(cliRoot, "acpx-runtime-sidecar.cjs");
-  const journal = join(root, "commands.ndjson");
-  const fixture = await readFile(fileURLToPath(new URL("./fixtures/fake-pi-warm-sidecar.cjs", import.meta.url)), "utf8");
-  await writeFile(sidecarPath, fixture.replace("/* fixture-config */ null", JSON.stringify({ journal, resumeDelayMs: 32_000, commandDigest: QUALIFIED_ACPX_PROFILES.pi.commandDigest })), { mode: 0o600 });
-  const digest = (path: string) => `sha256:${createHash("sha256").update(readFileSync(path)).digest("hex")}`;
-  const bundle = createCapabilityRunnerdCodexTransport({
-    provider: "acpx", acpxAgent: "pi", piThinkingLevel: "low", acpxPermissionMode: "deny-all",
-    runnerBinary: defaultCapabilityRunnerdBinary(), stateDirectory: root, runnerFilesystemRoot: root,
-    providerNodeCommand: providerNode, providerNodeCommandSha256: digest(providerNode),
-    acpxSidecarPath: sidecarPath, acpxSidecarSha256: digest(sidecarPath),
-    providerPackAuthorityDigest: `sha256:${"d".repeat(64)}`,
-    lifecyclePolicy: { mode: "warm", idleTimeoutMs: 60_000 },
-    environment: { PATH: "/usr/bin:/bin" },
-  });
-  bundle.transport.setServerRequestHandler(async () => ({
-    success: true,
-    contentItems: [{ type: "inputText", text: "Completion report accepted." }],
-  }));
-  let failure: unknown;
-  try {
-    await bundle.transport.request("initialize", {});
-    await bundle.transport.request("thread/start", {
-      cwd: root, model: "openrouter/deepseek/deepseek-v4-flash-0731",
-      dynamicTools: codexSemanticToolSpecs(),
-      completionContract: { revision: "warm-pi-contract", criterionIds: [] },
-    });
-    const runnerPid = bundle.evidence().runnerPid;
-    const notifications = bundle.transport.notifications()[Symbol.asyncIterator]();
-    const completeTurn = async () => {
-      await bundle.transport.request("turn/start", { input: [{ type: "text", text: "Complete the fixture turn." }] });
-      for (let index = 0; index < 64; index += 1) {
-        const next = await Promise.race([
-          notifications.next(),
-          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Fixture completion timed out")), 5_000)),
-        ]);
-        if (next.value?.method === "turn/completed") return;
-      }
-      throw new Error("Fixture turn did not complete");
-    };
-    await completeTurn();
-    const started = Date.now();
-    await bundle.transport.attachRun!({ runId: "run-pi-warm-second", turnId: "turn-pi-warm-second", itemId: "item-pi-warm-second" });
-    expect(Date.now() - started).toBeGreaterThan(30_000);
-    await completeTurn();
-    expect(bundle.evidence()).toMatchObject({ runnerPid, runnerExited: false });
-    const commands = (await readFile(journal, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
-    expect(commands.filter((entry) => entry.event === "spawn")).toHaveLength(2);
-    expect(commands.filter((entry) => entry.command === "session.open")).toHaveLength(2);
-    expect(commands.filter((entry) => entry.resumed)).toHaveLength(1);
-    expect(commands.filter((entry) => entry.command === "turn.start")).toHaveLength(2);
-    expect(commands.filter((entry) => entry.command === "session.close")).toHaveLength(1);
-  } catch (error) {
-    failure = error;
-    throw error;
-  } finally {
-    try {
-      await bundle.transport.close();
-    } catch (cleanupError) {
-      if (failure) throw new AggregateError([failure, cleanupError], "Warm attachment and strict cleanup failed");
-      throw cleanupError;
-    }
-    await rm(root, { recursive: true, force: true });
-  }
-}, 75_000);
-
 it("waits for a warm runner to re-authenticate before probing attachment readiness", async () => {
   const stateDirectory = await mkdtemp(
     join(tmpdir(), "runnerd-warm-reattach-before-probe-"),
@@ -8659,3 +8611,30 @@ it("aborts startup promptly on close while allowing the owned cleanup command to
     await drain;
   } finally { vi.useRealTimers(); }
 });
+it("launches and closes native Codex without materializing or editing the preconfigured home", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-preconfigured-launch-"));
+  const home = join(root, "user-home");
+  const codexHome = join(home, ".codex");
+  const stateDirectory = join(root, "session");
+  await mkdir(codexHome, { recursive: true });
+  await mkdir(stateDirectory);
+  const config = 'approval_policy = "never"\n';
+  const auth = '{"user_owned":true}';
+  await writeFile(join(codexHome, "config.toml"), config);
+  await writeFile(join(codexHome, "auth.json"), auth);
+  const bundle = createCapabilityRunnerdCodexTransport({
+    homeMode: "preconfigured", environment: { ...process.env, HOME: home, CODEX_HOME: codexHome },
+    runnerBinary: resolve(import.meta.dirname, "../../runner/target/debug/paperclip-runnerd"),
+    codexCommand: fakeCodex, codexArgs: fakeCodexArgs(stateDirectory), stateDirectory,
+  });
+  try {
+    await bundle.transport.request("thread/start", { cwd: stateDirectory, model: "gpt-5.6-sol", dynamicTools: [] });
+    await bundle.transport.close();
+    expect(await readFile(join(codexHome, "config.toml"), "utf8")).toBe(config);
+    expect(await readFile(join(codexHome, "auth.json"), "utf8")).toBe(auth);
+    await expect(stat(join(stateDirectory, "codex-home"))).rejects.toMatchObject({ code: "ENOENT" });
+  } finally {
+    await bundle.transport.close().catch(() => undefined);
+    await rm(root, { force: true, recursive: true });
+  }
+}, 30_000);

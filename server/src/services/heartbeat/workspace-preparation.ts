@@ -1,3 +1,6 @@
+import { nativeExecutionUsesTaskWorkspace } from "./external-provider.js";
+import { readGitCacheRestoration } from "../git-workspace-restoration.js";
+import { createHeartbeatPreparationTiming } from "./preparation-timing.js";
 import {
   resolveWorkspaceAfterLowTrustPreflight,
   WorkspaceValidationFailure,
@@ -29,7 +32,9 @@ import { readNativeWorkspaceSyncReference, readNativeWorkspaceSyncLocalCwd } fro
 import { parseObject } from "../../adapters/utils.js";
 import { materializeNativeChatTaskRoot } from "../native-runtime/native-chat-workspace.js";
 import { materializeIsolatedTaskDirectory } from "../isolated-task-directory.js";
-import { canIsolateRemoteWorkspaceSource, materializeIsolatedRemoteWorkspaceSource } from "../isolated-remote-workspace-source.js";
+import { canIsolateRemoteWorkspaceSource, materializeIsolatedRemoteWorkspaceSource, withIsolatedRepositorySourceLock } from "../isolated-remote-workspace-source.js";
+import { isRestrictedWorkspaceSourceDenial, RESTRICTED_WORKSPACE_SOURCE_REASON } from "../workspace-source-restriction.js";
+import { ConfigurationIncompleteFailure } from "./run-preparation.js";
 import {
   assertIsolatedWorkspaceSourceReadAccess,
   retainIsolatedWorkspaceSourceAccess,
@@ -147,8 +152,30 @@ function readNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
+/**
+ * A restricted task worktree in the shared checkout keeps this task's source denied when
+ * no fresh isolated clone is safe (an existing workspace may hold unpublished work).
+ * Name the owner action instead of failing as an opaque setup error.
+ */
+function restrictedWorkspaceSourceFailure(error: unknown, issueId: string): unknown {
+  if (!isRestrictedWorkspaceSourceDenial(error)) return error;
+  return new ConfigurationIncompleteFailure(
+    "This task's workspace source is a shared project checkout that also holds a task workspace this run cannot read, so Paperclip did not use it.",
+    { configurationIncomplete: { reason: RESTRICTED_WORKSPACE_SOURCE_REASON, issueId } },
+  );
+}
+
 export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspacePreparationInput) {
+  const sourceIssueId = input.reuse.reusableExistingExecutionWorkspace?.sourceIssueId
+    ?? input.reuse.existingExecutionWorkspace?.sourceIssueId ?? input.task.issueId;
+  if (!sourceIssueId || input.reuse.isDotRun) return prepareHeartbeatWorkspaceLocked(db, input);
+  return withIsolatedRepositorySourceLock(db, input.agent.companyId, sourceIssueId,
+    () => prepareHeartbeatWorkspaceLocked(db, input));
+}
+
+async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspacePreparationInput) {
   const { run, agent, controllerLease, nativeRunnerPreparationSpans } = input;
+  const timeWorkspace = createHeartbeatPreparationTiming(run.id);
   const {
     issueRef,
     issueId,
@@ -197,7 +224,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
   const {
     selectedEnvironmentDriver: lowTrustPreflightEnvironmentDriver,
     workspace: resolvedWorkspace,
-  } = await resolveWorkspaceAfterLowTrustPreflight({
+  } = await timeWorkspace("workspace_source_resolution", () => resolveWorkspaceAfterLowTrustPreflight({
     db,
     trustPreset,
     isolatedWorkspacesEnabled: runtimeWorkspaceSelectionEnabled,
@@ -222,8 +249,8 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
     resolveWorkspace: async () => {
       if (isDotRun) {
         // This is private controller storage, never a provider filesystem.
-        // v6 projects workspace.access=none and cwd=null to Dot.
-        const cwd = path.resolve(resolvePaperclipInstanceRoot(), "runtime", "paperclip-runner", "dot-controllers", agent.companyId, run.id);
+        // External providers receive workspace.access=none and cwd=null.
+        const cwd = path.resolve(resolvePaperclipInstanceRoot(), "runtime", "paperclip-runner", (persistedNativeExecutionInput?.provider.kind ?? mergedConfig.provider) === "muse" ? "muse-controllers" : "dot-controllers", agent.companyId, run.id);
         await fs.mkdir(cwd, { recursive: true, mode: 0o700 });
         return { cwd, source: "agent_home" as const, projectId: null, workspaceId: null, repoUrl: null, repoRef: null,
           workspaceHints: [], warnings: [], baseCwdFallback: false, materializationFailures: [], additionalWorkspaces: [], referencedProjectFailures: [] };
@@ -328,15 +355,15 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
           }
         : workspace;
     },
-  });
+  }));
   const hostProvisionDriver = selectedEnvironmentForConfig?.driver ?? lowTrustPreflightEnvironmentDriver;
-  const copyOnlyProvisioning = await workspaceRequiresCopyOnlyProvisioning(db, {
+  const copyOnlyProvisioning = await timeWorkspace("workspace_provision_policy", () => workspaceRequiresCopyOnlyProvisioning(db, {
     companyId: agent.companyId,
     task: issueRef ? { ...issueRef, workspaceSelection: input.task.workspaceSelection } : null,
     sourceProjectId: resolvedWorkspace.projectId,
     sourceWorkspaceId: resolvedWorkspace.workspaceId,
     boundWorkspace: reusableExistingExecutionWorkspace ?? existingExecutionWorkspace,
-  });
+  }));
   const skipHostProvision = copyOnlyProvisioning || hostProvisionDriver === "sandbox" || hostProvisionDriver === "ssh";
   const hostExecutionWorkspaceConfig = isDotRun ? {} :
     stripHostWorkspaceProvision({
@@ -352,7 +379,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
     repoRef: resolvedWorkspace.repoRef,
     additionalWorkspaces: resolvedWorkspace.additionalWorkspaces,
   } satisfies ExecutionWorkspaceInput;
-  await assertGitWorktreeBaseWorkspaceReady({
+  await timeWorkspace("workspace_base_validation", () => assertGitWorktreeBaseWorkspaceReady({
     requestedExecutionWorkspaceMode,
     config: hostExecutionWorkspaceConfig,
     issue: issueRef,
@@ -362,7 +389,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
       materializationFailures: resolvedWorkspace.materializationFailures,
       localPathOnlyWorkspace: resolvedWorkspace.localPathOnlyWorkspace,
     },
-  });
+  }));
   const workspaceStrategyForFingerprint = parseObject(
     hostExecutionWorkspaceConfig.workspaceStrategy,
   );
@@ -491,30 +518,32 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
     && (latestWorkspaceStrategyType === "git_worktree"
       || (workspaceReuseProvisioningPolicy.shouldRestoreExistingWorkspace && reusableExistingExecutionWorkspace?.strategyType === "git_worktree"))) {
     try {
-      isolatedWorkspaceSourceAccess = await assertIsolatedWorkspaceSourceReadAccess(db, {
+      isolatedWorkspaceSourceAccess = await timeWorkspace("workspace_source_authorization", () => assertIsolatedWorkspaceSourceReadAccess(db, {
         companyId: agent.companyId, sourceCwd: executionWorkspaceBase.baseCwd, actor: isolatedWorkspaceSourceActor,
-      });
+      }));
     } catch (error) {
       const [sourceChoice] = await db.select({ projectWorkspaceId: issues.projectWorkspaceId,
         executionWorkspaceId: issues.executionWorkspaceId,
         selection: issues.workspaceSelection }).from(issues)
         .where(and(eq(issues.id, issueId), eq(issues.companyId, agent.companyId)));
       if (!sourceChoice || sourceChoice.executionWorkspaceId
-        || (sourceChoice.projectWorkspaceId && sourceChoice.projectWorkspaceId !== resolvedWorkspace.workspaceId)) throw error;
+        || (sourceChoice.projectWorkspaceId && sourceChoice.projectWorkspaceId !== resolvedWorkspace.workspaceId)) {
+        throw restrictedWorkspaceSourceFailure(error, issueId);
+      }
       if (!canIsolateRemoteWorkspaceSource({ error, repoUrl: executionWorkspaceBase.repoUrl,
         reuseExisting: requestedShouldReuseExisting, hasExistingWorkspace: Boolean(existingExecutionWorkspace),
         selectedProjectWorkspaceId: sourceChoice.projectWorkspaceId ?? readNonEmptyString(context.projectWorkspaceId),
         selection: sourceChoice.selection, strategy: parseObject(hostExecutionWorkspaceConfig.workspaceStrategy),
-        trustPresetKind: trustPreset.kind })) throw error;
-      const cwd = await materializeIsolatedRemoteWorkspaceSource({ companyId: agent.companyId,
-        issueId, repoUrl: executionWorkspaceBase.repoUrl!, resolveGitAuth: workspaceGitAuthProvider });
+        trustPresetKind: trustPreset.kind })) throw restrictedWorkspaceSourceFailure(error, issueId);
+      const cwd = await timeWorkspace("workspace_source_materialize", () => materializeIsolatedRemoteWorkspaceSource({ companyId: agent.companyId,
+        issueId, repoUrl: executionWorkspaceBase.repoUrl!, resolveGitAuth: workspaceGitAuthProvider }));
       executionWorkspaceBase.baseCwd = cwd;
       resolvedWorkspace.cwd = cwd;
       isolatedRemoteSource = { schema: "paperclip.isolated-remote-source.v1", companyId: agent.companyId,
         issueId, repoUrl: executionWorkspaceBase.repoUrl };
-      isolatedWorkspaceSourceAccess = await assertIsolatedWorkspaceSourceReadAccess(db, {
+      isolatedWorkspaceSourceAccess = await timeWorkspace("workspace_source_authorization", () => assertIsolatedWorkspaceSourceReadAccess(db, {
         companyId: agent.companyId, sourceCwd: cwd, actor: isolatedWorkspaceSourceActor,
-      });
+      }));
     }
   }
   const beforeIsolatedSourceCopy = isolatedWorkspaceSourceAccess
@@ -533,7 +562,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
     executionWorkspace,
     reusedExecutionWorkspace,
     policy: resolvedWorkspaceReusePolicy,
-  } = isDotRun ? { executionWorkspace: { ...executionWorkspaceBase, strategy: "project_primary" as const, cwd: resolvedWorkspace.cwd, branchName: null, worktreePath: null, warnings: [], created: false, branchCreatedByRuntime: false } as RealizedExecutionWorkspace, reusedExecutionWorkspace: false, policy: workspaceReuseProvisioningPolicy } : await provisionExecutionWorkspaceForFreshnessDecision<RealizedExecutionWorkspace>(
+  } = isDotRun ? { executionWorkspace: { ...executionWorkspaceBase, strategy: "project_primary" as const, cwd: resolvedWorkspace.cwd, branchName: null, worktreePath: null, warnings: [], created: false, branchCreatedByRuntime: false } as RealizedExecutionWorkspace, reusedExecutionWorkspace: false, policy: workspaceReuseProvisioningPolicy } : await timeWorkspace("workspace_provision", () => provisionExecutionWorkspaceForFreshnessDecision<RealizedExecutionWorkspace>(
     {
       requestedShouldReuseExisting,
       existingExecutionWorkspaceId:
@@ -544,6 +573,10 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
       restoreExistingWorkspace: reusableExistingExecutionWorkspace
         ? () =>
             ensurePersistedExecutionWorkspaceAvailable({
+              prepareRestoredLocalSource: issueId ? sourceCwd => executionWorkspacesSvc.prepareConfiguredRepositorySource({
+                companyId: agent.companyId, issueId, workspaceId: reusableExistingExecutionWorkspace.id,
+                cwd: reusableExistingExecutionWorkspace.cwd!, agentId: agent.id, runId: run.id, sourceCwd,
+              }) : undefined,
               skipHostProvision,
               db,
               base: executionWorkspaceBase,
@@ -636,9 +669,9 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
           afterSourceCopy: afterIsolatedSourceCopy,
         }),
     },
-  );
+  ));
   if (isolatedWorkspaceSourceAccess && executionWorkspace.strategy === "git_worktree") {
-    await retainIsolatedWorkspaceSourceAccess(db, {
+    await timeWorkspace("workspace_source_retention", () => retainIsolatedWorkspaceSourceAccess(db, {
       companyId: agent.companyId,
       sourceCwd: executionWorkspaceBase.baseCwd,
       targetCwd: executionWorkspace.cwd,
@@ -646,7 +679,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
       captured: isolatedWorkspaceSourceAccess,
       issueId: issueId ?? undefined,
       phase: "verified",
-    });
+    }));
   }
   const resolvedProjectId =
     reusableExistingExecutionWorkspace
@@ -655,7 +688,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
   const resolvedProjectWorkspaceId =
     resolvedWorkspaceReusePolicy.shouldRestoreExistingWorkspace && reusableExistingExecutionWorkspace?.strategyType === "git_worktree"
       ? reusableExistingExecutionWorkspace.projectWorkspaceId
-      : issueRef?.projectWorkspaceId ?? resolvedWorkspace.workspaceId ?? null;
+      : isDotRun ? null : issueRef?.projectWorkspaceId ?? resolvedWorkspace.workspaceId ?? null;
   let persistedExecutionWorkspace: ExecutionWorkspace | null = null;
   let issueExecutionWorkspaceIdForRun =
     issueRef?.executionWorkspaceId ?? null;
@@ -676,7 +709,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
   const bindIssueToPersistedExecutionWorkspace = async (
     workspace: ExecutionWorkspace | null,
   ) => {
-    if (!issueId || !workspace || nativeRecoveryExecutionWorkspaceId) {
+    if (isDotRun || !issueId || !workspace || nativeRecoveryExecutionWorkspaceId) {
       return;
     }
     const nextIssueWorkspaceMode =
@@ -709,7 +742,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
       };
     }
     if (Object.keys(nextIssuePatch).length > 0) {
-      await executionWorkspacesSvc.bindTaskWorkspace(agent.companyId, issueId, workspace.id, nextIssuePatch);
+      await timeWorkspace("workspace_binding", () => executionWorkspacesSvc.bindTaskWorkspace(agent.companyId, issueId, workspace.id, nextIssuePatch));
       issueExecutionWorkspaceIdForRun = workspace.id;
       issueProjectWorkspaceIdForRun =
         resolvedProjectWorkspaceId ?? issueProjectWorkspaceIdForRun;
@@ -760,9 +793,9 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
     try {
       persistedWorktreeInstanceRoot =
         (
-          await readManagedWorktreeInstanceOwnership(
-            executionWorkspace.worktreePath,
-          )
+          await timeWorkspace("workspace_ownership_read", () => readManagedWorktreeInstanceOwnership(
+            executionWorkspace.worktreePath!,
+          ))
         )?.instanceRoot ?? null;
     } catch (error) {
       logger.warn(
@@ -796,7 +829,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
     persistedExecutionWorkspace =
       resolvedWorkspaceReusePolicy.shouldRestoreExistingWorkspace &&
       reusableExistingExecutionWorkspace
-        ? await executionWorkspacesSvc.update(
+        ? await timeWorkspace("workspace_record_update", () => executionWorkspacesSvc.update(
             reusableExistingExecutionWorkspace.id,
             {
               cwd: executionWorkspace.cwd,
@@ -817,9 +850,9 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
                   resolvedProjectWorkspaceId,
                 ),
             },
-          )
+          ))
         : !isDotRun && !persistedNativeExecutionInput && (resolvedProjectId || issueRef)
-          ? await executionWorkspacesSvc.create({
+          ? await timeWorkspace("workspace_record_create", () => executionWorkspacesSvc.create({
               companyId: agent.companyId,
               projectId: resolvedProjectId,
               projectWorkspaceId: resolvedProjectWorkspaceId,
@@ -853,7 +886,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
               lastUsedAt: new Date(),
               openedAt: new Date(),
               metadata: nextExecutionWorkspaceMetadata,
-            })
+            }))
           : null;
   } catch (error) {
     if (executionWorkspace.created) {
@@ -908,10 +941,10 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
     }
     throw error;
   }
-  await workspaceOperationRecorder.attachExecutionWorkspaceId(
+  await timeWorkspace("workspace_operation_binding", () => workspaceOperationRecorder.attachExecutionWorkspaceId(
     persistedExecutionWorkspace?.id ?? null,
-  );
-  await recordWorkspaceConfigFreshnessOperation({
+  ));
+  await timeWorkspace("workspace_config_recording", () => recordWorkspaceConfigFreshnessOperation({
     recorder: workspaceOperationRecorder,
     runId: run.id,
     decision: workspaceConfigFreshness,
@@ -923,7 +956,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
     previousWorkspaceId:
       workspaceReuseRequest.requestedExecutionWorkspaceId,
     activeWorkspaceId: persistedExecutionWorkspace?.id ?? null,
-  });
+  }));
   if (
     reusableExistingExecutionWorkspace &&
     persistedExecutionWorkspace &&
@@ -931,20 +964,20 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
       persistedExecutionWorkspace.id &&
     reusableExistingExecutionWorkspace.status === "active"
   ) {
-    await executionWorkspacesSvc.update(
+    await timeWorkspace("workspace_record_update", () => executionWorkspacesSvc.update(
       reusableExistingExecutionWorkspace.id,
       {
         status: "idle",
         cleanupReason: null,
       },
-    );
+    ));
   }
   await bindIssueToPersistedExecutionWorkspace(persistedExecutionWorkspace);
   const projectRepositoryPaths: string[] = [];
-  if (persistedExecutionWorkspace && issueId && !persistedNativeExecutionInput && !nativeRecoveryExecutionWorkspaceId) {
-    const taskRepositories = await executionWorkspacesSvc.prepareTaskRepositoriesForAdmission({ companyId: agent.companyId,
-      issueId, workspaceId: persistedExecutionWorkspace.id, cwd: executionWorkspace.cwd,
-      agentId: agent.id, runId: run.id, responsibleUserId });
+  if (!isDotRun && persistedExecutionWorkspace && issueId && !persistedNativeExecutionInput && !nativeRecoveryExecutionWorkspaceId) {
+    const taskRepositories = await timeWorkspace("workspace_repository_admission", () => executionWorkspacesSvc.prepareTaskRepositoriesForAdmission({ companyId: agent.companyId,
+      issueId, workspaceId: persistedExecutionWorkspace!.id, cwd: executionWorkspace.cwd,
+      agentId: agent.id, runId: run.id, responsibleUserId }));
     projectRepositoryPaths.push(...taskRepositories.map(repository => repository.relativePath));
   }
   if (executionWorkspace.projectId
@@ -954,10 +987,11 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
       eq(projectWorkspaces.companyId, agent.companyId),
       eq(projectWorkspaces.projectId, executionWorkspace.projectId),
     )).orderBy(asc(projectWorkspaces.createdAt), asc(projectWorkspaces.id));
-    const repositories = await prepareProjectRepositoryWorkspaces({
+    const repositories = await timeWorkspace("workspace_project_repositories", () => prepareProjectRepositoryWorkspaces({
       cwd: executionWorkspace.cwd,
       anchorRepoUrl: executionWorkspace.repoUrl,
       workspaces: repositoryRows,
+      restoredContents: persistedExecutionWorkspace ? readGitCacheRestoration(persistedExecutionWorkspace)?.contents : undefined,
       resolveGitAuth: workspaceGitAuthProvider,
       prepareLocalSource: persistedExecutionWorkspace && issueId
         ? (sourceCwd) => executionWorkspacesSvc.prepareConfiguredRepositorySource({
@@ -969,15 +1003,16 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
             companyId: agent.companyId, issueId, workspaceId: persistedExecutionWorkspace!.id,
             cwd: executionWorkspace.cwd, agentId: agent.id, runId: run.id,
           }) : undefined,
-    });
+    }));
     const paths = new Map(repositories.map((repo) => [repo.workspaceId, repo.cwd]));
+    const preparedRefs = new Map(repositories.map(repo => [repo.workspaceId, repo.repoRef]));
     projectRepositoryPaths.push(...repositories.map((repo) => path.relative(executionWorkspace.cwd, repo.cwd)));
     if (resolvedWorkspace.workspaceId) paths.set(resolvedWorkspace.workspaceId, executionWorkspace.cwd);
     resolvedWorkspace.workspaceHints = repositoryRows.map((source) => ({
       workspaceId: source.id,
       cwd: paths.get(source.id) ?? readNonEmptyString(source.cwd),
       repoUrl: readNonEmptyString(source.repoUrl),
-      repoRef: readNonEmptyString(source.repoRef),
+      repoRef: preparedRefs.has(source.id) ? preparedRefs.get(source.id)! : readNonEmptyString(source.repoRef),
     }));
   }
   if (persistedExecutionWorkspace) {
@@ -1005,7 +1040,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
         recoveryWorkspace.remoteCwd !== remoteRecovery.remote.remoteCwd)) {
       throw new Error("native_remote_recovery_lease_mismatch");
     }
-    acquiredEnvironment = await envOrchestrator.acquireForRun({
+    acquiredEnvironment = await timeWorkspace("workspace_environment_acquire", () => envOrchestrator.acquireForRun({
       companyId: agent.companyId,
       selectedEnvironmentId,
       localEnvironmentId: localEnvironment.id,
@@ -1022,7 +1057,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
         providerLeaseId: remoteRecovery.remote.providerLeaseId,
         remoteCwd: remoteRecovery.remote.remoteCwd,
       } } : {}),
-    });
+    }));
     await controllerLease.assertOwned();
     nativeRunnerPreparationSpans.push({
       name: "environment.acquire",
@@ -1098,7 +1133,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
     ReturnType<typeof envOrchestrator.realizeForRun>
   >;
   try {
-    realizationResult = await envOrchestrator.realizeForRun({
+    realizationResult = await timeWorkspace("workspace_environment_realize", () => envOrchestrator.realizeForRun({
       environment: selectedEnvironment,
       lease: activeEnvironmentLease.lease,
       adapterType: agent.adapterType,
@@ -1109,7 +1144,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
       effectiveExecutionWorkspaceMode,
       persistedExecutionWorkspace,
       duplexObservabilityRecorder,
-    });
+    }));
     nativeRunnerPreparationSpans.push({
       name: "environment.workspace.realize",
       parentName: "task.provider_session",
@@ -1151,12 +1186,12 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
     }
     const cwd = reference
       ? await readNativeWorkspaceSyncLocalCwd({ companyId: agent.companyId, runId: run.id, workspaceId, reference })
-      : persistedNativeExecutionInput && persistedNativeExecutionInput.schema !== "paperclip.native-execution-input.v6"
+      : nativeExecutionUsesTaskWorkspace(persistedNativeExecutionInput)
         && executionTarget?.kind !== "remote"
         ? persistedNativeExecutionInput.workspace.cwd
         : executionWorkspace.cwd;
-    await executionWorkspacesSvc.reserveTaskRepositoryRootForRecovery({ companyId: agent.companyId,
-      issueId, workspaceId, cwd, agentId: agent.id, runId: run.id });
+    await timeWorkspace("workspace_recovery_root", () => executionWorkspacesSvc.reserveTaskRepositoryRootForRecovery({ companyId: agent.companyId,
+      issueId, workspaceId, cwd, agentId: agent.id, runId: run.id }));
   }
   // Preserve the host-owned source before adapter context can share lease
   // metadata. A later copy-back failure must not adopt a rebound source.

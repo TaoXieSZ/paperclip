@@ -49,6 +49,15 @@ workflow reads GitHub metadata without checking out or executing PR code. Its au
 repository, head, and merge validation still decide whether tests can use AWS.
 Unapproved test workloads continue to use GitHub-hosted runners.
 
+The routing workflow also selects the CI scope. Middle PRs in a stack and PRs
+whose diff changes only release notes (`releases/v*.md` or
+`releases/beta/v*.md`) skip the build, test, and e2e lanes. The `policy` job
+and the `verify` and `e2e` aggregate checks still run. The release-notes check
+reads the diff between the event's base and head commits. If that lookup
+fails, or the diff is empty or may be truncated, the PR runs full CI. A
+notes-only PR stacked above other PRs also runs full CI, because its own diff
+does not include the lower PRs' code.
+
 The routing Fleet has two warm On-Demand runners and a four-runner ceiling.
 Test fleets cannot consume its runner slots. Hosted test queues therefore do
 not block AWS runner selection. A manual dispatch of `ci-routing.yml` on master
@@ -65,6 +74,20 @@ remain governed by the repository ruleset.
 When changing the workflow path or branch, authorize the new reference before
 updating the caller. Retain older authorized SHA references while queued runs or
 supported reruns still use them.
+
+General server shards run at most two test files at a time in separate Vitest
+forks. Each file retains its own home, config and process state, and its test
+cases run serially. An explicit `PAPERCLIP_TEST_DATABASE_URL` keeps those shards
+serial because the database is shared. Unsharded local tests, route/authz lanes,
+and native Runner lanes retain their existing concurrency. Sharded chat jobs run
+two independent partitions, each with its own embedded PostgreSQL, home and
+config; an explicit shared test database retains one partition per job.
+The Runner transport lease-expiry and cold-admission regressions live in their
+own file so those real-clock waits overlap other files in the existing pool.
+
+For a full wall-clock profile of all main PR CI jobs, add `profile-ci` to the PR.
+See [CI profiling](ci-profiling.md) for the Honeycomb waterfall, coverage,
+operator setup, and activation requirements.
 
 ## Start Dev
 
@@ -661,6 +684,58 @@ Set `SEARCH_EVAL_SCALE=1` to additionally measure a disposable 10,000-task,
 30,000-comment dataset. `SEARCH_EVAL_REPORT=/tmp/search-quality.json` saves
 per-query results and latency measurements; scale measurements are opt-in.
 
+### Repository workspace admission benchmark
+
+Measure a fresh checkout with and without the repository object cache:
+
+```sh
+pnpm --filter @paperclipai/server exec tsx ../scripts/benchmark-repository-object-cache.ts
+```
+
+This uses a synthetic 32 MiB repository and the real `file://` Git transport.
+It reports cache priming separately, then alternates five fresh checkouts per
+mode. Git's pack trace records received bytes. Each checkout has independent
+objects and passes `git fsck`. There is no injected latency or hosted network
+measurement.
+
+Measure cold sandbox staging with a disposable 10,000-file Git repository:
+
+```sh
+pnpm --filter @paperclipai/server exec tsx ../scripts/benchmark-workspace-staging.ts --baseline-ref=origin/master
+pnpm --filter @paperclipai/server exec tsx ../scripts/benchmark-workspace-staging.ts --baseline-ref=origin/master --transfer-delay-ms=3000
+```
+
+The benchmark alternates the baseline and current implementations. Both pack,
+verify, copy and extract real archives, then compare the resulting tree and Git
+HEAD. It retains dirty, deleted and untracked-file semantics and excludes ignored
+files. The transport is a local copy. The optional delay models a slow transfer;
+it does not measure hosted network or agent latency. The report contains every
+sample, whole-staging wall time, archive bytes and phase durations. Seed
+verification and upload can overlap, so do not sum their durations. The script
+temporarily imports baseline source beside the current source and removes it on
+exit. Run without other repository edits or heavy I/O for a useful comparison.
+
+Measure the real repository preparation service with a disposable embedded
+PostgreSQL database and synthetic history, without invoking an agent:
+
+```sh
+pnpm perf:workspace-admission
+pnpm perf:workspace-admission -- --realpath-delay-ms 2.3
+pnpm perf:workspace-admission -- --distinct-cwds --realpath-delay-ms 2.3
+```
+
+Defaults model 8,516 workspaces, 27,971 provenance records and 28 retained
+readers on the shared root. The first command measures ordinary local I/O;
+the others inject filesystem metadata latency for sensitivity comparisons.
+Injected latency does not establish the actual latency of a hosted volume.
+`--distinct-cwds` creates separate folders to exercise bounded concurrent I/O.
+`--service /absolute/path/to/baseline/server/src/services/execution-workspace-repositories.ts`
+compares another checkout, which needs its workspace dependencies installed.
+The JSON report times only the service call, counts filesystem lookups and SQL
+statements, and verifies retained source identities. Setup and cleanup are
+excluded. Source tasks and permissions are synthetic; this is not an end-to-end
+agent latency measurement.
+
 ### Recent task ordering
 
 The streamlined sidebar keeps five recent tasks per company and account in browser
@@ -669,6 +744,18 @@ state. Older detail responses cannot move the stored activity time backward.
 Activity-only reorderings wait for one second without further activity changes;
 new and removed tasks appear immediately. Titles, status, and live indicators stay
 current during that delay.
+
+### Local Linux runner qualification
+
+Before serving requests, the server reads `getconf GNU_LIBC_VERSION` once with
+an asynchronous subprocess, a one-second timeout, and a 1 KiB output limit.
+Runner discovery reuses those immutable platform facts. This check does not
+generate a Node diagnostic report or resolve socket hostnames.
+
+If `getconf` is missing, fails, times out, or returns an unrecognized version,
+the local libc remains unknown and automatic GNU/Linux runner selection stays
+disabled. Qualified Linux targets still require GNU libc 2.39 or newer. Existing
+saved execution choices remain unchanged.
 
 ### OpenCode native runtime
 
@@ -836,6 +923,15 @@ New Slack conversations receive default communication guidance that requires a
 clickable link to each task the agent creates. Agents use the public task URL
 from Paperclip tools or task context and report when a link is unavailable.
 Existing conversations keep their original communication guidance snapshot.
+
+Slack catalog discovery uses `resolveSlackTaskAuthorization` to recheck the live
+run, task, agent, linked user, endpoint, and current bot credential. Discovery
+does not consume a compatibility revision, so it avoids hashing company policy
+and profile rows. Callers that need a revision continue to use
+`resolveSlackTaskAuthority`; connector skill snapshots and governed operations
+retain their existing fingerprint. Both paths share the same authorization
+implementation and perform fresh checks on every call. The real PostgreSQL
+controls are in `server/src/__tests__/slack-tool-preparation.test.ts`.
 
 ### Chat activity pagination and callback diagnostics
 
@@ -1046,6 +1142,35 @@ When effective run config changes, Paperclip may intentionally skip a saved adap
 
 An explicit `reuse_existing` Git workspace keeps its recorded source repository, including after its project-workspace row is deleted or the project primary changes. The server verifies the original company, project, repository origin, and worktree registration before reuse. It does not attach a deleted association to the new primary. A conflicting explicit project-workspace selection, missing source identity, or an unverified legacy local checkout blocks the run. Restore the original source. Before intentionally clearing the existing-workspace binding to choose a new repository, review and preserve its retained work. Missing worktrees may be reconstructed only from the verified original source; current project defaults are not a fallback.
 
+### Isolated repository object cache
+
+Fresh task-private GitHub HTTPS sources use a pristine upstream object cache at
+`<instance root>/repository-object-cache/<company>/<opaque scope>`. The scope
+includes the repository URL and current credential fingerprint. Credentials
+are not stored in the cache. Other remote providers retain the ordinary clone
+path. Existing task sources and local dirty source copies keep their current
+behavior.
+
+Every new checkout still contacts the remote with current Git credentials.
+`git clone --reference-if-able --dissociate` reuses objects but selects the
+remote's current refs and creates independent storage. An unavailable or denied
+remote cannot fall back to cached files. A failed reference clone retries once
+without the cache and resolves credentials again. Task commits and dirty files
+never populate this cache. Reproducibility checks continue to use a fresh upstream object store for
+their independent proof; they do not use this cache.
+
+Cache publication is optional and never waits for another publisher. It keeps
+at most 64 entries and 4 GiB per company, with 2 GiB per entry. Temporary cache
+construction can use one additional entry's space; the existing manifest free
+space reserve applies. Priming uses a five-second cooperative work budget and
+a 4,096-entry scan allowance; individual filesystem calls and cleanup can
+exceed that time. Existing entries and abandoned pending entries count
+against capacity. A full, corrupt or unavailable cache leaves ordinary cloning
+available. No cache eviction is performed. Credential rotation selects another
+scope and can reduce reuse after capacity is exhausted. There is no link from
+an admitted task checkout back to this cache, so cache removal cannot remove
+task Git objects.
+
 ## Workspace Git Scan Protection
 
 Paperclip applies one process-wide scheduler to expensive host-side workspace Git enumeration, including changed-file browsing, runtime/finalization cleanliness guards, and adapter sandbox-sync snapshots. The scheduler defaults to two active scans and a bounded queue of 32. Identical buffered scans of the same canonical worktree share one subprocess, while successful changed-file listings are cached for 10 seconds. Streaming snapshot scans have caller-owned sinks, so they use separate jobs in the same queue and are never cached or coalesced. Correctness-sensitive runtime guards bypass the result cache.
@@ -1064,6 +1189,20 @@ These bounds apply to application filename storage, not total process memory. Re
 Workspace preparation resolves an existing root symlink before reading the snapshot and uses that resolved directory for the rest of the operation. Overlay staging checks the captured root identity and each selected path's ancestors before and after copying. A replaced root or a symlink in an ancestor directory stops staging before upload. A missing source file can be skipped; other source inspection errors stop staging. Selected symlink entries remain symlinks.
 
 Execution-workspace close-readiness and branch-reconciliation status checks allow up to 32 MiB of buffered output. This accommodates nested task worktrees while preserving exact untracked-file counts. Larger output fails the scan and blocks destructive cleanup. Other buffered scan bounds stay unchanged.
+
+Heartbeat configuration, environment selection, and finalization read persisted
+workspace records through the company-scoped `getStoredById` service method.
+Those reads do not inspect Git, refresh runtime service health, or resolve PR
+delivery. Workspace detail responses still load live display state, and the
+execution and cleanup boundaries retain their live branch and cleanliness
+guards. Close readiness derives ancestry from its existing ahead/behind
+comparison, avoiding a second history walk with `merge-base`.
+
+Measure the avoided reads on synthetic workspaces with
+`pnpm --filter @paperclipai/server exec tsx ../scripts/benchmark-workspace-record-reads.ts`.
+The benchmark checks identical persisted fields and reports wall time and actual
+Git command counts. Use `--resident-mib=1536` to exercise a large Node process on
+Linux. It measures workspace reads, not end-to-end agent latency.
 
 The cache intentionally trades up to a few seconds of changed-file freshness for stable server latency. The file browser retains an explicit refresh action, does not start its query while the panel or browser tab is hidden, and presents overloads as retryable failures rather than an empty workspace. A full queue returns `503` with code `workspace_git_scan_saturated`; a scan exceeding its wall-clock limit returns `504` with code `workspace_git_scan_timeout`. Both responses include `Retry-After: 1`.
 
@@ -1376,6 +1515,23 @@ When a workspace service runs Paperclip for browser OAuth QA, configure its `exp
 
 ## Heartbeat Service Extractions
 
+Routine and issue-monitor dispatch uses saved future deadlines through
+`server/src/services/scheduled-work.ts` and the existing delivery coordinator.
+Startup restores the next deadline. Routine edits and monitor changes notify
+their worker after the enclosing database transaction settles, including native
+`set_task_monitor` writes. Deadlines crossed during a scan receive an immediate
+follow-up scan. Work already overdue at scan start retains heartbeat recovery.
+Each worker runs
+independently and retains the existing atomic claims and execution checks.
+The heartbeat interval still requests a recovery scan; it does not determine
+the dispatch time of a known future deadline. Failed scans retry at that same
+interval. Future timers do not hold idle work open, and standby, idle drain and
+shutdown retain the coordinator's admission gates. During idle drain, expired
+deadlines retry at the recovery interval while dispatch is paused; future
+deadlines keep their original timer so a canceled drain does not delay them. External database writers
+rely on the periodic recovery scan. Sparse cron searches reuse one parsed
+expression and skip impossible UTC dates before localized formatting.
+
 Keep relevant heartbeat extractions and their focused tests in `server/src/services/heartbeat/`.
 Follow [Heartbeat execution boundaries](../rules/heartbeat-execution-boundaries.mdc)
 for state lifetime, admission, recovery ownership, cleanup ordering, and verification.
@@ -1416,6 +1572,16 @@ The executor receives credential ownership and failure-redaction updates as soon
 as they are available, so later setup failures still clean up acquired resources.
 Busy-account deferral returns explicitly before session/workspace preparation.
 Public-path tests are in `server/src/__tests__/heartbeat-execution-configuration.test.ts`.
+
+Concurrent skill preparations join the company inventory refresh before taking
+the version-cache lock. Each preparation then reads its actor's current skill
+visibility under that lock. Snapshot materialization and the durable run version
+pins stay in the same locked callback. Only the in-flight inventory work is
+shared; completed refreshes and permission results are not cached.
+
+Browser Use skill assignment first checks for an enabled, active Browser Use
+connection in the run's company. With none, it skips full tool discovery.
+With one, the existing task, tool-policy and credential-grant checks still apply.
 
 Session preparation is in `server/src/services/heartbeat/session-preparation.ts`.
 It selects fresh or resumable sessions from effective config and managed-account
@@ -1623,6 +1789,14 @@ cancellation remain enforced; the snapshot is removed when the provider exits.
 Native Codex is qualified only with `codexPermissionMode: "never"`. The create
 and edit surfaces do not offer `on-request` or `untrusted`, and a persisted
 unsupported value fails with remediation instead of being silently coerced.
+
+Remote native Codex prepares managed GitHub access and assigned MCP tools
+concurrently after the backend claims its session scope and validates its launch
+binding. Provider startup waits for both preparations. A failed preparation waits
+for the other operation to settle before the existing run cleanup releases its
+GitHub access. Discovery remains fresh for each run, and tool calls still use the
+current gateway permissions. Local, custom-backend and other provider paths keep
+their existing preparation order.
 OpenCode defaults to `allow`, with explicit `ask` and `deny` options; ACPX
 defaults to `approve-all`, with explicit `approve-paperclip`, `approve-reads`,
 and `deny-all` options. Codex conversion keeps a non-empty model and
@@ -1717,6 +1891,25 @@ versions across directories. With these artifacts preinstalled, startup links
 and verifies them without uploading a binary or installing packages. Deploy
 the updated sandbox image with the matching runner qualification changes.
 
+When the provider allows concurrent sync operations, native startup prepares the
+runner and the default image Codex harness together, with at most two operations
+in flight. It still verifies the runner contract, selected transport, executable
+hash, and final launch paths. Both preparations must settle before startup can
+return a failure. Providers without this capability, explicit harness uploads,
+and npm installs keep the serial path. See the
+[native artifact controls](../server/src/services/native-runtime/native-artifact-preparation.test.ts).
+
+### Remote GitHub launcher staging
+
+Managed GitHub launchers stage their nine text files in one bounded control
+command. Each file retains its content-hash check, process lock, upload check,
+and atomic rename. The command runs outside the persistent agent session and
+stops at the first failed file. Earlier files can remain after a later failure;
+the launcher environment is returned only after the whole command succeeds.
+The batch permits at most 16 files and 1 MiB of shell input. Launcher staging
+keeps its 15-second deadline. Run `packages/adapter-utils/src/github-launcher-environment.test.ts`
+and `packages/adapter-utils/src/sandbox-callback-bridge.test.ts` for these contracts.
+
 ### Native runner restart recovery
 
 Custom source-mode HTTP launchers should create their listener with
@@ -1789,6 +1982,21 @@ that classification finishes.
   waits for the previous executor to finish releasing its task resources.
 - A verified dead runner starts a replacement from the same durable root and
   resumes the same provider checkpoint. Only the operating-system PID changes.
+- A prepared remote workspace interrupted before the executor's first claim
+  can continue on the same run without a provider checkpoint. Under the recovery
+  locks, Paperclip requires attempt and controller generation zero, no prior
+  controller or lease owner, and no session, process, launch, or provider evidence.
+  Any existing durable runner root must still prove an untouched bootstrap before
+  execution starts. A prior claim or contradictory evidence retains the hold.
+  A server-owned preparation protocol marker is required. It is recorded only
+  when fresh native identities are created by a server with the ownership fence.
+  Older unmarked preparations remain held during rolling upgrades; revisiting an
+  existing run never upgrades that marker from caller-supplied profile data.
+- If the original preparation resumes after another execution claimed the run,
+  it yields without failing the shared run or cleaning up the new owner. An
+  expired foreign lease still requires normal recovery before takeover.
+  Recovery leaves this server's active preparation with its current execution.
+  A detached execution also preserves the current owner's run-scoped gateway tokens.
 - A runner that died before its first authenticated connection can restart on
   the same run only when its durable root proves that no provider authority or
   checkpoint exists. Paperclip quarantines the incomplete root first.
@@ -1811,9 +2019,26 @@ Only successful turns retain a live warm provider session. A structured failed
 or cancelled result must retire that session and collect its managed files before
 heartbeat stops the reusable sandbox. A later retry can resume the same sandbox
 without inheriting the stopped provider transport.
+
+An idle warm owner proves only the exact prior run in the same company, session,
+workspace and environment. Mutable configuration compatibility is checked
+separately: changed settings retire the owned provider before a replacement can
+execute. A copied older owner record, an active or missing owner, and a different
+environment cannot use this in-memory proof. Database terminal status alone is
+not proof that an unsuspended remote runner can be adopted.
+
 The shared lease-release boundary rechecks the durable run status for recovery
 and ordinary teardown. Successful workspace copy-back alone must not keep a
 failed turn's sandbox running.
+
+Native workspace export also fences destructive lease cleanup. A failed heartbeat
+can still own unexported files, including when checkpoint copyback failed before
+its semantic result was accepted. The orphan and pending-cleanup sweeps preserve
+the exact lease bound by a prepared workspace-sync reference until export records
+it finalized. Direct release and destruction apply the same check. Explicit
+stop-only cleanup remains available; neither a retry deadline nor an exhausted
+retry budget authorizes deletion of the only workspace copy. This does not change
+successful warm-session retention or admit another provider turn.
 
 Run the credential-free real-process restart suite with:
 
@@ -1860,6 +2085,10 @@ automatically alongside it; see [Agent commentary](agent-commentary.md).
 Other runtime skills remain controlled by
 `paperclipSkillSync.desiredSkills`. The native `paperclip_runner` does not use
 this legacy default because its protocol supplies the control-plane contract.
+An empty native runtime selection returns before company skill inventory work.
+An explicit empty stored key set does the same. Nonempty selections still use
+the current inventory, version and access checks. Legacy automatic selections
+still resolve their operational and feedback skills.
 
 Validate the catalog without writing the manifest:
 
@@ -1895,6 +2124,46 @@ executable script). The build contract is documented in
 CI runs `pnpm --filter @paperclipai/skills-catalog validate` and the package's
 vitest suite, so always regenerate the manifest in the same commit as the
 catalog change.
+
+## Skill Version Snapshot Retention
+
+A run uses a skill version from a directory on disk:
+`<instance>/skills/<companyId>/__versions__/<skillId>/<versionId>/`. The server
+writes this directory from the stored files of the `company_skill_versions` row.
+The directory is a cache. When the server removes it and the row stays, the next
+run that selects the version writes it again.
+
+The server starts scanning one minute after startup, then hourly, in batches of
+50 inspected directories with one-second continuations. Current versions,
+explicit agent pins, active runs, and unresolved recovery pins stay. A company
+with an active or unsettled run whose pins are unknown is skipped. Optional
+`PAPERCLIP_SKILL_VERSION_RETENTION_KEEP` retains additional newest versions
+(default `0`). Idle versions expire after `PAPERCLIP_SKILL_VERSION_RETENTION_GRACE_MINUTES`
+(default `60`). Separate `__version_access__` records track use; existing caches
+without records receive a full observation period before expiration.
+
+Preparation, durable run pins, audits, and eviction share a company-scoped
+PostgreSQL lock across processes. Eligible directories are atomically renamed
+to unique managed `.trash-<UUID>` names. Deletion runs outside the preparation
+lock and resumes after a crash. Saved version and repository snapshot rows are
+retained, and normal runtime use restores missing caches without upstream access.
+
+Paperclip Runner preparation skips this lock when the effective selection has no
+skills or a saved selection is explicitly empty. It still records the empty
+version snapshot. Explicit skill references, selected versions, and the legacy
+operational skill keep their existing authorization and cache-lock requirements.
+
+The sweep also handles orphan version directories after explicit skill deletion,
+preserving captured run pins until they settle. Only recognized staging/trash
+names are eligible; unknown directories and symlinked paths are retained.
+
+Set `PAPERCLIP_SKILL_VERSION_RETENTION_DRY_RUN=true` before rollout to inspect
+candidate bytes and skip reasons without deleting or changing access records.
+Set `PAPERCLIP_SKILL_VERSION_RETENTION_ENABLED=false` to disable sweeps while
+leaving restoration available. Internal `skillVersionRetentionService` methods
+support company-scoped diagnosis and bounded instance-wide continuations.
+Server logs report candidates, allocated bytes reclaimed, and skip reasons.
+Compare volume usage separately because concurrent writes affect net savings.
 
 ## App-Shipped Teams Catalog
 
@@ -2007,9 +2276,23 @@ Environment overrides:
 - `PAPERCLIP_WORKSPACE_REAPER_COOLDOWN_DAYS=<days>` sets how long the
   terminal-workspace reaper waits after an issue tree becomes terminal before it
   archives the execution workspace and deletes the worktree. A person can reopen
-  the work inside this window. The default is `7`. A value of `0` disables the
+  the work inside this window. The default is `1`. A value of `0` disables the
   cooldown and restores immediate reaping. A negative or non-numeric value falls
   back to the default.
+- `PAPERCLIP_WORKSPACE_COMPACTION_DELAY_HOURS=<hours>` sets how long the reaper
+  waits after an issue tree becomes terminal before it removes regenerable files
+  from the workspace (see "Terminal workspace compaction" below). The default is
+  `1`. A value of `0` compacts on the next sweep. A negative, empty, or
+  non-numeric value falls back to the default.
+- `PAPERCLIP_WORKSPACE_COMPACTION_ENABLED=false` turns compaction off. Any other
+  value keeps it on.
+- `PAPERCLIP_SKILL_VERSION_RETENTION_KEEP=<count>` sets how many of the newest
+  materialized versions of each skill stay on disk (see "Skill Version Snapshot
+  Retention" above). The default is `0`. A negative, empty, or non-numeric value
+  falls back to the default.
+- `PAPERCLIP_SKILL_VERSION_RETENTION_GRACE_MINUTES=<minutes>` sets how long a
+  materialized skill version stays after its last use. The default is `60`. A
+  negative, empty, or non-numeric value falls back to the default.
 
 Without `PAPERCLIP_DB_BACKUP_ALERT_FILE`, health checks look for
 `db-backup-to-s3.failure` in the backup directory, beside the backup directory,
@@ -2271,10 +2554,42 @@ that flushes after the tab hides marks data stale without starting a refetch.
 The developer-server health poll also stops in hidden tabs.
 
 Workspace detail responses share concurrent Git inspections and reuse their
-results for up to five seconds after completion. The cache holds at most 256
-entries. Close-readiness checks, the terminal-workspace reaper, and the final
-cleanup validation still inspect Git afresh. A display result never authorizes
-worktree removal.
+results for up to thirty seconds after completion. Workspace identity and metadata
+changes invalidate the cached result. The cache holds at most 256
+entries. Close-readiness checks and final cleanup validation request separate
+Git scans that cannot join an older in-flight scan. A display result never
+authorizes worktree removal.
+
+The terminal-workspace reaper uses the database work coordinator. Startup scans
+recover existing workspace rows in bounded pages. Issue status and tree changes,
+workspace lifecycle writes, and pull-request work-product writes signal work on
+their transaction before writing. The coordinator wakes after the outer
+transaction settles and holds idle admission while writes or cleanup are active.
+Empty and nonterminal-only lanes have no recurring timer or query. Terminal trees
+schedule their actual cooldown deadline; unresolved delivery or cleanup eligibility
+is checked again after five minutes. Nonterminal trees, cooldowns, and active runs
+are checked before Git. The worker shares Git readiness across compatible rows
+that point at one directory within a bounded page. Company, branch, base ref,
+and runtime ownership must match. Each row keeps its own task and delivery
+assessment, which reuses the task tree read by the early gate. Unchanged terminal
+candidates also back off for five minutes during unrelated commit wakes. Scoped
+task/workspace hints invalidate
+affected candidates; changed tree or workspace revisions invalidate them too.
+Deadline selection reuses task trees read by those pages and performs no separate
+full-inventory query. Commits during a paged rotation request another bounded
+rotation so changes behind its cursor are recovered.
+The backoff retains at most 256 candidates and only applies to the background
+worker. Final cleanup still checks the current task tree,
+delivery evidence, ownership, lifecycle generation, and Git state under the
+existing cleanup locks.
+
+These wakes cover the owning `createDb` scope in this server process. Direct SQL
+and other server processes require startup recovery. Local deadlines do not
+establish external wake-alarm coverage or whole-instance sleep safety. The local
+sleep inventory blocks host suspension until bounded recovery succeeds. Cooldown
+eligibility is an earliest allowed cleanup time; passive retained directories can
+wait for the next wake, when startup restores their rows. Existing idle-sleep
+blockers and cleanup admission holds remain authoritative.
 
 The connection-health sweep selects only due IDs in SQL before applying its
 limit. Legacy `paperclip_plugin` placeholder connections are excluded: their
@@ -2286,6 +2601,124 @@ from stored configuration problems. Verify connection transport and endpoint
 fields before disabling a connection. Verify workspace ownership, active runs,
 Git state, and runtime-service readiness before closing a workspace. A missing
 URL or old workspace timestamp alone does not prove that a row is disposable.
+
+### Reconstructable Git cache expiration
+
+The terminal-workspace worker can expire Paperclip-owned isolated Git worktrees
+24 hours after every task in their tree is done or cancelled, independently of
+PR merge or delivery status. Enable it with
+`PAPERCLIP_GIT_CACHE_EXPIRATION_ENABLED=true`. It defaults to dry run; set
+`PAPERCLIP_GIT_CACHE_EXPIRATION_DRY_RUN=false` after inspecting the structured
+`execution_workspace.git_cache_expiration` logs. Logs report candidate and
+reclaimed bytes, base removal, and skip reasons. The existing bounded lifecycle
+sweep supplies scheduling and shutdown cancellation.
+
+The eligibility query first rejects paths shared with another execution or
+project checkout. This prevents a known shared-path veto from scanning retained
+run contexts. Unshared paths still require every existing task, run, recovery,
+lease, service and filesystem check in the same lifecycle lock.
+
+Before deletion the worker fetches the exact commit into a fresh object store
+using the company's normal Git identity (anonymously when no identity resolves
+outside an agent run, which still proves public repositories; a private
+repository that cannot be verified keeps its workspace) and commits a versioned restoration
+recipe to workspace metadata. Current runs, previews, pending reopening,
+unresolved recovery, dirty/untracked files, unknown ignored files, unproven
+ownership, and unsupported or unique Git state prevent deletion. Ignored files
+can be discarded only when they are repository-ignored regenerable output,
+ignored `.claude/settings.local.json` saved as an encrypted snapshot of at most
+64 KiB, or a managed project checkout under `.paperclip-repositories/<repo>-<hash>`
+whose exact commit, branch, and source identity are saved in the restoration recipe.
+Tracked settings, oversized settings, symbolic links, and unknown files remain protected. A checkout qualifies only when its name maps back to one of
+the project's repositories and it passes the same checks as the worktree
+(clean tree, no hidden index flags, allowed local config, no in-progress
+state), stock Git storage (no custom hooks), no linked worktrees, no
+unreachable objects, and every commit reachable from its refs or reflogs is
+reachable from a current upstream branch or tag, read fresh from the project
+repository's URL with the company's Git identity. Task repositories
+(`task-repo-*`) always prevent deletion. Inspection runs Git with
+`core.fsmonitor` disabled, so a repository's local config cannot make it run a
+command. Standard linked-worktree `FETCH_HEAD` records are retained unless every
+referenced commit is an ancestor of the saved HEAD or passes a fresh upstream fetch.
+Malformed records, symbolic links, and more than 32 distinct fetched commits prevent
+expiration.
+Deletion first renames the worktree to recorded trash; restart and reopening
+finish that cleanup under the same source/lifecycle locks.
+
+`PAPERCLIP_GIT_BASE_EXPIRATION_ENABLED=true` additionally permits removal of an
+owned isolated remote-source base after all consumers expire and all remaining
+refs and files are verified reproducible. Shared project clones remain intact.
+Normal authorized reopening recreates a missing source and checks out the saved
+commit, including nested project repositories, even after upstream advances.
+Settings bytes and permissions restore before provisioning; their encrypted payloads
+are bound to the company, workspace, and relative path and require the instance
+secrets master key. The worker rechecks the complete saved contents before deletion.
+A changed workspace is retained and made usable instead of deleting newer work.
+Interrupted settings publication and partial nested restoration are retryable.
+Normal preparation retains the saved nested repository selection when project
+ref or path settings change. A durable contents checkpoint lets provisioning
+retry without overwriting files it changed. Expiration records ownership before
+publishing native Git locks; restart recovery removes only those owned locks.
+Inaccessible upstream produces an explicit
+retryable restoration failure. It never substitutes the default branch.
+Reopening failures reject the consuming request with HTTP 409 before saving a
+comment or changing its task. The response preserves the restoration message, so
+the composer keeps an editable draft and permits retry after access is restored.
+
+Both enable switches default off. Rollback disables further expiration while
+leaving saved recipes and restoration support intact. Recovery archives, runner
+backups, non-Git workspaces, and immutable skill snapshots are unaffected.
+
+### Terminal workspace compaction
+
+A finished task often keeps its worktree for a long time: the reaper archives a
+worktree only when its delivery is merged and its files are clean, and then only
+after the cooldown. Most of a worktree's size is installed dependencies and build
+output, not work. Compaction removes those files and keeps everything else, so a
+finished task does not hold gigabytes while it waits for the reaper (or forever,
+when it has no merged pull request or has leftover files).
+
+The reaper compacts a workspace once per terminal cycle, after
+`PAPERCLIP_WORKSPACE_COMPACTION_DELAY_HOURS`. Server startup waits for the
+reaper's first sweep, so that sweep never compacts; later sweeps do. A workspace
+qualifies when all of these hold:
+
+- the workspace is an isolated linked Git worktree (never a shared workspace or a
+  project's main checkout);
+- every issue in its tree is done or cancelled;
+- no queued or running heartbeat run works on the tree or the workspace;
+- no runtime service runs from the workspace.
+
+Compaction removes only directories that have a regenerable name
+(`node_modules`, `dist`, `build`, `coverage`, `storybook-static`, `target`,
+`.cache`, `.next`, `.nuxt`, `.parcel-cache`, `.svelte-kit`, `.turbo`, `.vite`),
+that the repository's own `.gitignore` files ignore (a negated pattern, a global
+excludes file, or `.git/info/exclude` does not count), and that hold no tracked
+file. A directory with such a name
+that does not qualify (for example a tracked `build/`) is searched in turn, so
+ignored dependencies inside it still go. It never enters `.git` or
+`.paperclip`, and it never follows a symlink. It checks each directory's ignore
+status on its own, so dependencies below an ignored parent (for example
+`vendor/tool/node_modules`) are found. Its Git reads have a deadline and stop
+when the sweep stops. Tracked files, uncommitted changes,
+untracked files, other ignored files (such as `.env` or local data), the branch,
+and its commits all stay. The workspace row stays active.
+
+The removal is a rename into `.paperclip-compaction-trash` beside the worktree,
+made while the reaper holds the workspace lifecycle lock. The reaper checks the
+conditions above before the rename and again after it, in the same transaction.
+If the task reopened or a run started in between, the directories move back.
+Otherwise the trash is deleted. Trash that an interrupted compaction or a failed
+delete leaves behind is deleted by a later sweep once it is more than an hour
+old. The sweep checks each worktree parent directory at most every 30 minutes,
+whether or not anything is left to compact.
+
+A compacted worktree is in the same state as a freshly created one, so when the
+task resumes, whatever produced those files the first time produces them again:
+reuse runs the workspace provision command (or `scripts/provision-worktree.sh`),
+which reinstalls dependencies when `node_modules` is missing. Repositories without
+a provision command rely on the agent's own install step, as they do for a new
+worktree.
 
 ### Browser realtime connection recovery
 

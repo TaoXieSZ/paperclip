@@ -16,7 +16,7 @@ vi.mock('@/lib/router', () => ({
   useNavigate: () => context.navigate,
   useParams: () => ({ sourceId: context.sourceId }),
 }));
-vi.mock('@/api/skillSources', () => ({ skillSourcesApi: { list: vi.fn(), projectRepositories: vi.fn(), adoptProject: vi.fn(), settings: vi.fn(), repositories: vi.fn(), discoverStream: vi.fn(), create: vi.fn(), select: vi.fn(), refresh: vi.fn(), disconnect: vi.fn() } }));
+vi.mock('@/api/skillSources', () => ({ skillSourcesApi: { list: vi.fn(), projectRepositories: vi.fn(), adoptProject: vi.fn(), settings: vi.fn(), branches: vi.fn(), repositories: vi.fn(), discoverStream: vi.fn(), create: vi.fn(), select: vi.fn(), refresh: vi.fn(), disconnect: vi.fn() } }));
 
 const repos = {
   connections: [{ id: 'personal', name: 'Personal' }, { id: 'shared', name: 'Engineering' }],
@@ -52,6 +52,7 @@ beforeEach(() => {
   vi.mocked(skillSourcesApi.list).mockResolvedValue([]);
   vi.mocked(skillSourcesApi.projectRepositories).mockResolvedValue([]);
   vi.mocked(skillSourcesApi.repositories).mockResolvedValue(structuredClone(repos));
+  vi.mocked(skillSourcesApi.branches).mockResolvedValue({ defaultBranch: 'master', branches: [{ name: 'master', isDefault: true }], truncated: false });
   vi.mocked(skillSourcesApi.discoverStream).mockResolvedValue(discovery);
   context.sourceId = 'new';
   sessionStorage.clear();
@@ -62,6 +63,111 @@ afterEach(async () => {
 });
 
 describe('GitHub skill source import', () => {
+  it('groups the same repository and ref across projects and shows import progress until it is installed', async () => {
+    context.sourceId = '';
+    const repository = { projectId: 'one', projectName: 'Paperclip', projectVisibility: 'open' as const,
+      workspaceId: 'workspace-one', repositoryUrl: 'https://github.com/acme/skills', trackingRef: 'HEAD',
+      bindingId: null, sourceId: null, status: 'available' as const, lastError: null };
+    vi.mocked(skillSourcesApi.projectRepositories).mockResolvedValue([repository, { ...repository, projectId: 'two', projectName: 'Sentry', workspaceId: 'workspace-two' }]);
+    let finish!: (value: { bindingId: string }) => void;
+    vi.mocked(skillSourcesApi.adoptProject).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }))
+      .mockResolvedValue({ bindingId: 'binding-two' });
+    await mount();
+    expect(document.querySelectorAll('[aria-label="Project repositories"] section')).toHaveLength(1);
+    expect(document.body.textContent).toContain('Paperclip, Sentry');
+    await act(async () => button('Import skills').click()); await flush();
+    expect(document.querySelector('[aria-busy="true"]')).not.toBeNull();
+    expect(document.querySelector('[role="status"]')?.textContent).toContain('Starting import');
+    vi.mocked(skillSourcesApi.projectRepositories).mockResolvedValue([
+      { ...repository, status: 'pending' }, { ...repository, projectId: 'two', projectName: 'Sentry', workspaceId: 'workspace-two', status: 'pending' },
+    ]);
+    await act(async () => finish({ bindingId: 'binding-one' })); await flush();
+    expect(skillSourcesApi.adoptProject).toHaveBeenCalledWith('company-1', 'workspace-two');
+    expect(document.querySelector('[role="status"]')?.textContent).toContain('queued');
+    expect(button('Importing…').disabled).toBe(true);
+  });
+
+  it('offers branch repair rather than connection repair for an unavailable tracked ref', async () => {
+    context.sourceId = '';
+    const source = { ...sourceFixture(), trackingRef: 'main', lastError: 'The tracked GitHub branch or revision is unavailable. Use the repository’s default branch or update its configured ref.' };
+    vi.mocked(skillSourcesApi.list).mockResolvedValue([{ ...source, repairAction: 'branch' }]);
+    vi.mocked(skillSourcesApi.settings).mockResolvedValue({ ...source, trackingRef: 'master', lastError: null });
+    await mount();
+    expect(button('Choose connection')).toBeUndefined();
+    await act(async () => button('Choose a new branch').click()); await flush();
+    await act(async () => document.querySelector<HTMLButtonElement>('button[aria-label="Branch"]')!.click()); await flush();
+    await act(async () => (document.querySelector('[cmdk-item][data-value="master"]') as HTMLElement).click()); await flush();
+    await act(async () => button('Change branch').click()); await flush();
+    expect(skillSourcesApi.branches).toHaveBeenCalledWith('company-1', source.id, {}, expect.any(AbortSignal));
+    expect(skillSourcesApi.settings).toHaveBeenCalledWith('company-1', source.id, { revision: source.revision, trackingRef: 'master' });
+  });
+
+  it.each([
+    'This repository and branch are already in Sources. Use that source; installed skills were kept.',
+    'The repository at this URL has changed identity. Add it as a new source.',
+  ])('preserves actionable branch conflict advice: %s', async message => {
+    context.sourceId = '';
+    const source = { ...sourceFixture(), trackingRef: 'main', lastError: 'Unavailable branch.', repairAction: 'branch' as const };
+    vi.mocked(skillSourcesApi.list).mockResolvedValue([source]);
+    vi.mocked(skillSourcesApi.settings).mockRejectedValue(new ApiError(message, 409, {}));
+    await mount();
+    await act(async () => button('Choose a new branch').click()); await flush();
+    await act(async () => document.querySelector<HTMLButtonElement>('button[aria-label="Branch"]')!.click()); await flush();
+    await act(async () => (document.querySelector('[cmdk-item][data-value="master"]') as HTMLElement).click()); await flush();
+    await act(async () => button('Change branch').click()); await flush();
+    expect(document.querySelector('[role="dialog"] [role="alert"]')?.textContent).toBe(message);
+    expect(document.querySelector('button[aria-label="Branch"]')?.textContent).toContain('master');
+  });
+
+  it('keeps an existing source compact while project import is pending', async () => {
+    context.sourceId = '';
+    vi.mocked(skillSourcesApi.list).mockResolvedValue([{ ...sourceFixture(), trackingRef: 'HEAD', projects: [{ id: 'paperclip', name: 'Paperclip', visibility: 'open', active: true }] }]);
+    vi.mocked(skillSourcesApi.projectRepositories).mockResolvedValue([{ projectId: 'sentry', projectName: 'Sentry', projectVisibility: 'open',
+      workspaceId: 'second-workspace', repositoryUrl: sourceFixture().repositoryUrl, trackingRef: 'HEAD', bindingId: 'binding', sourceId: null, status: 'pending', lastError: null }]);
+    await mount();
+    expect(document.querySelectorAll(`a[href="${sourceFixture().repositoryUrl}"]`)).toHaveLength(1);
+    expect(document.querySelector('[aria-label="Project repositories"]')).toBeNull();
+    expect(document.querySelector('[aria-label="Skills from Sentry"]')).toBeNull();
+    expect(document.body.textContent).not.toContain('Other projects with this repo');
+    expect(document.body.textContent).not.toContain('Sentry');
+    expect(document.body.textContent).not.toContain('Paperclip');
+    expect(document.querySelector('a[href="/skills"]')).toBeNull();
+    expect(document.querySelector('[role="status"]')?.textContent).toContain('Importing skills');
+  });
+
+  it('allows remaining project imports while another matching workspace is pending', async () => {
+    context.sourceId = '';
+    const repository = { projectId: 'one', projectName: 'Paperclip', projectVisibility: 'open' as const, workspaceId: 'already-pending',
+      repositoryUrl: 'https://github.com/acme/skills', trackingRef: 'HEAD', bindingId: 'binding', sourceId: null, status: 'pending' as const, lastError: null };
+    vi.mocked(skillSourcesApi.projectRepositories).mockResolvedValue([repository,
+      { ...repository, projectId: 'two', projectName: 'Sentry', workspaceId: 'available-workspace', status: 'available', bindingId: null }]);
+    vi.mocked(skillSourcesApi.adoptProject).mockResolvedValue({ bindingId: 'second-binding' });
+    await mount();
+    expect(document.querySelector('[role="status"]')?.textContent).toContain('queued');
+    expect(button('Import remaining skills')?.disabled).toBe(false);
+    await act(async () => button('Import remaining skills').click()); await flush();
+    expect(skillSourcesApi.adoptProject).toHaveBeenCalledTimes(1);
+    expect(skillSourcesApi.adoptProject).toHaveBeenCalledWith('company-1', 'available-workspace');
+  });
+
+  it('retains the selected connection and repairs a missing branch directly from connection setup', async () => {
+    context.sourceId = '';
+    const source = { ...sourceFixture(), connectionId: 'personal', lastError: 'Choose a GitHub connection to enable automatic updates.', repairAction: 'connection' as const };
+    vi.mocked(skillSourcesApi.list).mockResolvedValue([source]);
+    vi.mocked(skillSourcesApi.settings).mockRejectedValueOnce(new ApiError('The tracked GitHub branch or revision is unavailable.', 422, { code: 'skill_source_ref_unavailable' }))
+      .mockResolvedValue({ ...source, trackingRef: 'master', lastError: null });
+    await mount();
+    await act(async () => button('Choose connection').click()); await flush();
+    await act(async () => button('Save connection').click()); await flush();
+    expect(skillSourcesApi.settings).toHaveBeenLastCalledWith('company-1', source.id, { revision: source.revision, connectionId: 'personal' });
+    await act(async () => button('Choose a new branch').click()); await flush();
+    await act(async () => document.querySelector<HTMLButtonElement>('button[aria-label="Branch"]')!.click()); await flush();
+    await act(async () => (document.querySelector('[cmdk-item][data-value="master"]') as HTMLElement).click()); await flush();
+    await act(async () => button('Change branch').click()); await flush();
+    expect(skillSourcesApi.branches).toHaveBeenLastCalledWith('company-1', source.id, { connectionId: 'personal' }, expect.any(AbortSignal));
+    expect(skillSourcesApi.settings).toHaveBeenLastCalledWith('company-1', source.id, { revision: source.revision, connectionId: 'personal', trackingRef: 'master' });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
   it('shows measured Git download progress before skill discovery and retains the automatically chosen connection', async () => {
     let finish!: (value: typeof discovery & { connectionId: string }) => void;
     vi.mocked(skillSourcesApi.discoverStream).mockImplementation((_company, _input, update) => {

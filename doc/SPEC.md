@@ -722,6 +722,9 @@ the runtime. A declarative manifest can suggest public entrypoints and setup req
 new imports keep repository files together and select all discovered skills. Missing
 references, setup problems and omitted files produce persistent warnings. Files rejected
 for unsafe execution or secret disclosure are excluded without blocking other files.
+Oversized repositories use a bounded package of skill folders and referenced files
+with their original paths. Missing references do not block a valid selected skill;
+fallback preserves previously installed shared dependencies or retains the old version.
 The installed file viewer exposes saved repository dependencies. Importing never runs
 setup or configures host tools. New
 upstream skills require reviewed selection; removed or deselected skills remain
@@ -745,6 +748,14 @@ agent OAuth resource. It reuses browser/device consent and signed event delivery
 while preserving agent pairing, normal run admission and task authority.
 Personal grants cannot authorize Runner operations. See
 [OpenAI Dot Runner](openai-dot-runner.md) for its supported release boundary.
+
+Personal Meta Muse is another experimental named Runner agent. Its managed
+receiver uses short-lived pairing and rotating private credentials; its human
+authorizer remains distinct from the agent identity. Paperclip owns admission,
+task authority, and native finalization. Detector health alone does not prove
+execution, and uncertain remote effects prevent overlapping dispatch. See
+[Personal Muse receiver](muse-personal-agent.md) for setup, stopping limits, and
+the required live qualification before release.
 
 ### Experimental connection routing
 

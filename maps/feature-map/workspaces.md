@@ -18,6 +18,23 @@ Agent access: [companion](../agent-access-map/workspaces.md).
 - `files-git`: inspect workspace files and repository state used for the deliverable.
 - `closure`: close/reopen or reconcile through permitted controls without losing work.
 
+For a historical failed export whose exact sandbox was destroyed, the task recovery
+notice offers **Continue from saved sources** to an authorized board operator.
+Select surviving task attachments, record lost work and external action outcomes,
+then rebuild through fresh-session admission. The old failed run remains failed.
+Bounded bootstrap retries retain this decision and recheck their system wake,
+predecessors, saved files and current execution gates before provider startup.
+Later cancelled runs require their own confirmed stop and board file repair.
+Their evidence is preserved with the reconstruction and rechecked before dispatch.
+Stop retains unfinished native files; startup also repairs missing historical
+retention without replaying the cancelled turn.
+Daytona stop-only cleanup confirms retention and accepts an already archived source.
+Cancelled native file recovery can record a verified no-action outcome. Its
+confirmation stays optional and resets when the source changes.
+Retained sandboxes keep their existing export recovery path. Automated coverage:
+[reconstruction](../../server/src/services/native-runtime/native-workspace-reconstruction.test.ts).
+Live staging acceptance remains separate from these regression tests.
+
 ## How to get to it (user POV)
 
 ### `task-workspace`
@@ -57,6 +74,15 @@ and [preparation tests](../../server/src/services/heartbeat/workspace-preparatio
 exercise the real Git isolation and lifecycle guards. They do not qualify live
 remote credentials or a provider deployment.
 
+For reconstructable Git expiration, finish a disposable task tree, run the
+internal lifecycle sweep after its 24-hour grace, and inspect candidate/reclaimed
+bytes. Advance its upstream first; use the ordinary task/workspace reopen control
+and verify the original commit, file contents, and subsequent persisted work.
+Current runs, previews, recovery, unique files and shared base clones must stay.
+The [expiration tests](../../server/src/__tests__/git-workspace-expiration.test.ts)
+exercise real local Git and database paths, interruption and concurrent reopening;
+cloud credentials and the deployed user journey require separate live evidence.
+
 For task workspace selection, use the authorized task workspace API to choose a
 task directory, project source, or existing workspace. Verify that a change
 made during a run stays pending until the next normal admission. Submit another
@@ -90,6 +116,12 @@ SSH keeps its explicit remote provision-command path; these checks
 do not claim a new sandbox provision transport.
 Low-trust closed-worktree reopening, including a board-comment reopen of a projectless task, must also suppress both kinds of host provision script. Returned checkpoints must reject file, symlink or missing parents before host writes, even if a nested file is marked unchanged. The retained host file and recovery evidence must survive rejection. These are automated safety contracts, not new live runtime acceptance.
 
+An unchanged returned snapshot skips the host scan after acquiring the writer lock
+and checking authority. Concurrent host edits remain untouched; changed files,
+modes, symlinks and deletions still take the conflict path. The
+[unchanged restore regression](../../packages/adapter-utils/src/workspace-restore-unchanged.test.ts)
+checks both hooks under the lock. This is source-level coverage, not a cloud latency result.
+
 For a child created by an admitted agent with an explicit existing workspace, verify that a matching sandbox boundary permits creation before the child has an ID. A changed child policy, unrelated parent, or forged creator run must fail. See the [child workspace trust regression](../../server/src/__tests__/task-workspace-child-trust.test.ts). This automated contract does not add live acceptance evidence.
 
 ### `workspace-management`
@@ -107,6 +139,16 @@ Manual: Provision a disposable workspace, wait for readiness, start an available
 
 - A link or running badge does not prove the service is reachable from the user’s browser.
 - Workspace IDs, runtime leases, and repository paths are not interchangeable.
+- Terminal workspace cleanup wakes after committed task/workspace/PR changes and
+  restores cooldown deadlines at startup. Empty lanes stop scanning. Display Git
+  results can lag by thirty seconds. Compatible records share one advisory Git
+  inspection per bounded page, while each record keeps its own delivery check.
+  Destructive cleanup starts a separate Git scan even if an older scan is running.
+  The [worker tests](../../server/src/__tests__/terminal-workspace-work.test.ts)
+  cover quiet lanes and deadlines. The
+  [service tests](../../server/src/__tests__/execution-workspaces-service.test.ts)
+  cover real PostgreSQL signals and retained worktrees. These tests do not
+  qualify an external wake alarm or a live provider deployment.
 - Organizational project, source project, task files, personal `AGENT_HOME`, and
   provider home have separate meanings. Private source ownership remains attached
   to copied files after source configuration changes or workspace closure.

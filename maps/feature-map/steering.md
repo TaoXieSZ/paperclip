@@ -70,6 +70,14 @@ cover durable ordering, authorization, steering acknowledgements, interrupt
 recovery, and concurrent dispatch. [Composer](../../ui/src/components/task-chat/TaskChatComposer.test.tsx)
 covers drafts and uncertain saves.
 
+[Task-detail delivery races](../../ui/src/pages/IssueDetail.test.tsx) cover a
+consumed message whose send response and queue snapshot arrive late. A started
+run's input receipt removes that message from pending, while a separate unsent
+message stays queued. Admission to a run that has not started is not delivery.
+A later retry of the same message remains visible in its new authoritative queue.
+Receipts retain the primary wake and coalesced source queue IDs. They clear a late
+snapshot even when its target names the preceding run or is null.
+
 ```sh
 pnpm exec vitest run ui/src/components/task-chat/TaskChatQueuedMessages.test.tsx server/src/__tests__/issue-queued-comments-routes.test.ts
 ```
@@ -82,6 +90,8 @@ fixture and opt-in prerequisites; skipped native cases are not native proof.
 
 Manual: queue three distinguishable messages. Edit one, reorder them, reload,
 and confirm the saved order. Discard one and confirm it never reaches execution.
+After a queued message enters a started run, confirm it leaves pending even if
+the send response arrives later. Reload and confirm it appears once in history.
 Steer one while busy and verify the agent receives that exact message once.
 Repeat with a rejected steer and a stale second-tab edit; the UI must preserve
 retryable content and explain the conflict. On a fresh run, interrupt with a
@@ -89,6 +99,17 @@ queued follow-up and verify confirmed stop followed by one continuation. Pause
 the task (and separately its ancestor), preserve a draft, then resume the actual
 hold; no hidden send should occur while paused. Check both task presentations
 when available; the named component tests do not prove every host integration.
+
+Fixture-backed recovery check: start with an agent in its completed paused
+lifecycle state, then insert a new accepted `deferred_issue_execution` request
+through the [PostgreSQL recovery fixture](../../server/src/modules/wake-queue/adapters/postgres.test.ts).
+Normal wake admission
+rejects paused agents, so this pending state cannot be created by sending a new
+message through the ordinary UI or API. Let release and periodic recovery run.
+Confirm that the saved request remains pending. Resume the agent, wait for its
+lifecycle to become ready, and verify one delivery. An explicit Pause cancels
+older queued work; those cancelled receipts must not be replayed. A paused
+request must not prevent another eligible recipient's queued work from proceeding.
 
 ### `agent-chat`
 

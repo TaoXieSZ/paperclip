@@ -2,6 +2,18 @@
 
 Product map: [Execution workspaces, services, and files](../feature-map/workspaces.md).
 
+Lost-source reconstruction adds the board-only
+`POST /api/issues/{id}/recovery-actions/reconstruct-workspace` action. It requires
+`runtime:manage` and ordinary task visibility. Agents cannot authorize it. The
+result is a durable fresh-session admission request, subject to current execution
+gates. It grants no additional tool access, budget, work window or permission to
+repeat completed actions. Attachments must belong to the same task and company.
+The original failed run and lost-export evidence remain unchanged.
+Later native run-only cancellations can coexist only with confirmed lease stops,
+board file-only repair and an external-action outcome of `not_performed`.
+Their immutable evidence is checked again at dispatch. Historical cancellation
+retention runs internally and grants no new agent operation or authority.
+
 Review date: 2026-10-12. Source commit: `58e16dbddfc9c8d0cf60867f9d9847f0feda055b`.
 Native REST transport reconciled in this change; see the
 [shared transport contract](README.md#native-rest-transport).
@@ -51,12 +63,23 @@ retain the original denial without cloning or replacing their unpublished commit
 New implicit Git defaults record project-source provenance. Untyped explicit,
 inherited and older ambiguous checkout bindings retain the denial; admission reads
 the current company-scoped binding before considering the fallback.
+A retained denial blocks the task as `configuration_incomplete`
+(`workspace_source_restricted`) before dispatch; it grants no access and names the
+owner action on the task.
 Local paths, unsupported transports and credential-bearing URLs are not fallback
 sources. Company/task/remote bindings, real paths, Git storage and the exact origin
 are revalidated for reuse, cleanup and reopening. A failed save removes only the
 owned task worktree. The [isolated-source service](../../server/src/services/isolated-remote-workspace-source.ts)
 and its local regression tests establish source and lifecycle boundaries; live
 agent/provider qualification remains separate.
+Reconstructable Git expiration adds no agent endpoint or permission. It records
+company/workspace/repository identity and an exact commit before removing owned
+cache files. Existing task/workspace reopening retains current company, source,
+and trust checks. Missing upstream access returns a retryable error; it does not
+choose a newer commit or grant access to another company's source. Shared project
+bases and unresolved recovery remain protected. Local lifecycle evidence is in
+[expiration tests](../../server/src/__tests__/git-workspace-expiration.test.ts).
+
 Writable aliases must also be compatible with current and retained physical
 source projects' trust boundaries. Incompatible choices are rejected before
 dispatch; a projectless alias cannot bypass required sandbox containment.
@@ -75,6 +98,12 @@ then primary source, creation time and ID. A missing or foreign configured sourc
 does not authorize controller hooks. This precedence neither changes existing
 creation validation nor rotates bindings or clears retained copy-only markers.
 Closed-worktree reopening checks current task, agent, organizational and source policies without assuming a future driver. Effective low-trust reopens suppress configured and built-in host scripts. Returned checkpoints must have directory parents for every nested entry before merging, including unchanged entries; invalid output leaves retained host files intact and keeps recovery evidence.
+
+Skipping the host scan for a fully unchanged returned snapshot grants no new
+access. The merge still holds its canonical writer lock and runs both authority
+and publication hooks. Denials still propagate, and checkpoint/archive validation
+is unchanged. [Regression coverage](../../packages/adapter-utils/src/workspace-restore-unchanged.test.ts)
+is source-level evidence only.
 Child creation by an admitted agent checks an explicit prospective-task context before the child is saved. The creator run must have an authoritative saved policy and a verified company/agent/parent lineage. Current parent, prospective child and physical source policies must fit that boundary. This creation path does not relax exact task/run checks for existing-task writes. The [child trust regression](../../server/src/__tests__/task-workspace-child-trust.test.ts) is automated source-level evidence, not live agent qualification.
 Source review for these additions: PR #15749 and
 [task workspace routes](../../server/src/routes/task-workspaces.ts),

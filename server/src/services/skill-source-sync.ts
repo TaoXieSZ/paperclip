@@ -42,7 +42,8 @@ export async function projectSkillRepositories(db: Db, companyId: string, actor:
     const binding = bindings.find(item => (item.active || (!item.sourceId && item.lastError !== null)) && item.workspaceId === workspace.id && item.repositoryUrl === repo.repositoryUrl && item.trackingRef === repo.trackingRef);
     result.push({ projectId: project.id, projectName: project.name, projectVisibility: project.visibility as 'open' | 'private',
       workspaceId: workspace.id, ...repo, bindingId: binding?.id ?? null, sourceId: binding?.sourceId && !removed.has(binding.sourceId) ? binding.sourceId : null,
-      status: binding?.sourceId && removed.has(binding.sourceId) ? 'available' : binding?.status ?? 'available', lastError: binding?.lastError ?? null });
+      status: binding?.sourceId && removed.has(binding.sourceId) ? 'available' : binding?.status ?? 'available', lastError: binding?.lastError ?? null,
+      ...(binding?.status === 'pending' ? { importState: binding.leaseToken && binding.leaseExpiresAt && binding.leaseExpiresAt > new Date() ? 'importing' as const : 'queued' as const } : {}) });
   }
   return result;
 }
@@ -223,10 +224,14 @@ export function skillSourceSyncService(db: Db, options: { context?: (setup: Setu
         const [source] = await tx.select().from(companySkillSources).where(and(
           eq(companySkillSources.companyId, binding.companyId), eq(companySkillSources.id, sourceId))).for('update');
         if (!source || source.removedAt) throw conflict('Source was removed during import. Retry to start independent tracking.');
+        if (source.trackingRef !== binding.trackingRef || source.repositoryUrl.toLowerCase() !== scan.repositoryUrl.toLowerCase()
+          || (source.repositoryId && source.repositoryId !== scan.repositoryId)) {
+          throw conflict('Source repository or branch changed during import. Retry from Skills.');
+        }
         const linked = await tx.update(projectSkillSources).set({ sourceId, status: 'ready', lastError: null, failureCount: 0, leaseToken: null, leaseExpiresAt: null })
           .where(and(eq(projectSkillSources.id, binding.id), eq(projectSkillSources.companyId, binding.companyId),
             eq(projectSkillSources.active, true), eq(projectSkillSources.leaseToken, token))).returning({ id: projectSkillSources.id });
-        if (linked.length) await settleInitialSkillWork(tx as unknown as Db, binding.companyId, scan.packageMode === 'skills' ? {} : scan);
+        if (linked.length) await settleInitialSkillWork(tx as unknown as Db, binding.companyId, scan.packageMode === 'skills' || scan.repositorySubset ? {} : scan);
         return linked.length > 0;
       });
     } catch (error) {

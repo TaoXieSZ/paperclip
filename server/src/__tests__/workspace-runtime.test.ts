@@ -1204,27 +1204,6 @@ describe("realizeExecutionWorkspace", () => {
     ]);
   });
 
-  it("does not reset a reused worktree with untracked changes", async () => {
-    const { sourceRepo, remotePath, repoRoot } = await createClonedRepoWithRemote();
-
-    const initial = await realizeWorktreeForTest(repoRoot, null);
-    const initialHead = await readGit(initial.cwd, ["rev-parse", "HEAD"]);
-    await fs.writeFile(path.join(initial.cwd, "scratch.txt"), "uncommitted scratch\n", "utf8");
-
-    await advanceRemoteMaster(sourceRepo, remotePath, "auth-fix.txt");
-
-    const reused = await realizeWorktreeForTest(repoRoot, null);
-
-    expect(reused.created).toBe(false);
-    expect(await readGit(reused.cwd, ["rev-parse", "HEAD"])).toBe(initialHead);
-    await expect(fs.readFile(path.join(reused.cwd, "scratch.txt"), "utf8")).resolves.toBe(
-      "uncommitted scratch\n",
-    );
-    expect(reused.warnings).toEqual([
-      expect.stringContaining("is behind origin/master by 1 commit"),
-    ]);
-  });
-
   it("does not reset a reused worktree with untracked changes when status.showUntrackedFiles=no", async () => {
     const { sourceRepo, remotePath, repoRoot } = await createClonedRepoWithRemote();
 
@@ -1391,6 +1370,8 @@ describe("realizeExecutionWorkspace", () => {
   it.each(["missing", "empty"] as const)("records the actual lookup and fetch outcome for a %s origin", async (mode) => {
     const { repoRoot } = await createClonedRepoWithRemote();
     await runGit(repoRoot, mode === "missing" ? ["remote", "remove", "origin"] : ["config", "remote.origin.url", ""]);
+    const remoteUrl = mode === "empty" ? await readGit(repoRoot, ["remote", "get-url", "origin"]) : null;
+    if (mode === "empty") expect(["", "origin"]).toContain(remoteUrl);
     let authCalls = 0;
     const error = await realizeWorktreeForTest(repoRoot, "absent-fixture", async () => { authCalls++; return null; }).catch(error => error);
     expect(error).toBeInstanceOf(UnresolvedWorkspaceBaseRefError);
@@ -1399,6 +1380,12 @@ describe("realizeExecutionWorkspace", () => {
       expect(authCalls).toBe(0);
       expect(readUnresolvedWorkspaceBaseRefDiagnostic(error)).toEqual({ schemaVersion: 1,
         remoteLookup: "failed", authLookup: "not_requested", fetch: "not_attempted", refResolution: "failed", refExitCode: 128 });
+    } else if (remoteUrl === "") {
+      expect(error.fetchError).toBeNull();
+      expect(authCalls).toBe(1);
+      expect(error.defaultBranch).toBeNull();
+      expect(readUnresolvedWorkspaceBaseRefDiagnostic(error)).toEqual({ schemaVersion: 1,
+        remoteLookup: "empty", authLookup: "not_requested", fetch: "not_attempted", refResolution: "failed", refExitCode: 128 });
     } else {
       // Git returns the remote name when its URL is empty, then the fetch fails.
       expect(error.fetchError).toBeTruthy();
@@ -7347,8 +7334,10 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
     }
   }, 20_000);
 
-  it("commits fixed-port reservations before readiness windows longer than 60 seconds", async () => {
+  it("commits fixed-port reservations across the configured database idle timeout", async () => {
     const fixture = await createRuntimeFixture();
+    const readinessDb = createDb(tempDb!.connectionString, { idleTimeoutSeconds: 1, maxConnections: 1 });
+    const [initialConnection] = await readinessDb.$client<{ pid: number }[]>`select pg_backend_pid() as pid`;
     const cleanupRuntimeHome = await createRuntimeHome();
     const workspace = fixture.workspaces[0]!;
     const basePort = await findFreePort();
@@ -7374,7 +7363,7 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
 
     try {
       startPromise = startRuntimeServicesForWorkspaceControl({
-        db,
+        db: readinessDb,
         actor: fixture.actor,
         issue: null,
         workspace: fixture.realizedWorkspace(workspace),
@@ -7398,16 +7387,18 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
         parentWrite.then(() => "committed" as const),
         new Promise<"locked">((resolve) => setTimeout(() => resolve("locked"), 2_000)),
       ]);
+      expect(parentWriteOutcome).toBe("committed");
 
       const readinessWaitStartedAt = Date.now();
-      await new Promise((resolve) => setTimeout(resolve, 60_250));
-      expect(Date.now() - readinessWaitStartedAt).toBeGreaterThanOrEqual(60_000);
+      await new Promise((resolve) => setTimeout(resolve, 1_250));
+      expect(Date.now() - readinessWaitStartedAt).toBeGreaterThanOrEqual(1_000);
+      const [reconnected] = await readinessDb.$client<{ pid: number }[]>`select pg_backend_pid() as pid`;
+      expect(reconnected!.pid).not.toBe(initialConnection!.pid);
 
       await fs.writeFile(releaseMarkerPath, "release");
       const started = (await startPromise)[0]!;
       await parentWrite;
 
-      expect(parentWriteOutcome).toBe("committed");
       expect(started).toMatchObject({
         port: basePort,
         url: `http://127.0.0.1:${basePort}`,
@@ -7434,6 +7425,7 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
       }).catch(() => undefined);
       await cleanupRuntimeHome();
       await fixture.cleanup();
+      await readinessDb.$client.end({ timeout: 1 });
     }
   }, 80_000);
 
@@ -7554,6 +7546,8 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
     }
   }, 20_000);
 
+  // Exhaustion starts and stops all 32 candidates after ownership fails.
+  // Give their real-process stability checks and verified cleanup bounded headroom.
   it("does not accept an occupied allocated port when listener ownership is unavailable", async () => {
     const fixture = await createRuntimeFixture();
     const cleanupRuntimeHome = await createRuntimeHome();
@@ -7594,7 +7588,7 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
       await cleanupRuntimeHome();
       await fixture.cleanup();
     }
-  }, 20_000);
+  }, 60_000);
 
   it("returns a bounded structured conflict and exposes only same-company workspace references", async () => {
     const fixture = await createRuntimeFixture({

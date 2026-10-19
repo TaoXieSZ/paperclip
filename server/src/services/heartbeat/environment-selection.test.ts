@@ -53,7 +53,7 @@ describe.skipIf(!support.supported)("heartbeat environment selection boundary", 
         projectExecutionWorkspacePolicy: null, issueExecutionWorkspaceSettings: null,
       },
       config: { config: {}, sourceWorkspaceConfig: {}, issueAssigneeOverrides: null },
-      services: { environmentsSvc: environmentService(db), executionWorkspacesSvc: executionWorkspaceService(db), instanceSettings: instanceSettingsService(db), findSharedWorkspaceHolder: vi.fn(async () => null) },
+      services: { environmentsSvc: environmentService(db), executionWorkspacesSvc: executionWorkspaceService(db), instanceSettings: instanceSettingsService(db), findSharedWorkspaceHolder: vi.fn(async () => null), findExecutionWorkspaceHolder: vi.fn(async () => null) },
     };
     const workspace = async () => {
       const created = await executionWorkspaceService(db).create({ companyId: company.id, projectId: project.id, sourceIssueId: issue.id, name: "Saved workspace", mode: "isolated_workspace", strategyType: "git_worktree", cwd: home, providerRef: home });
@@ -89,6 +89,27 @@ describe.skipIf(!support.supported)("heartbeat environment selection boundary", 
     expect(result.persistedNativeExecutionInput?.binding.executionWorkspaceId).toBe(original.id);
   });
 
+  it("selects the saved execution workspace without inspecting live Git delivery state", async () => {
+    const { input, workspace, recover } = await fixture();
+    const saved = await workspace();
+    recover(saved.id);
+    input.services.executionWorkspacesSvc = executionWorkspaceService(db, {
+      inspectGitCloseReadiness: async () => {
+        throw new Error("Live Git inspection is unavailable");
+      },
+    });
+
+    const result = await selectHeartbeatEnvironment(db, input);
+
+    expect(result.reusableExistingExecutionWorkspace).toMatchObject({
+      id: saved.id,
+      companyId: input.agent.companyId,
+      cwd: home,
+      strategyType: "git_worktree",
+    });
+    expect(result.nativeRecoveryExecutionWorkspaceId).toBe(saved.id);
+  });
+
   it("does not treat a synthetic run-id recovery binding as a persisted workspace", async () => {
     const { input, recover } = await fixture();
     recover(input.run.id);
@@ -107,6 +128,34 @@ describe.skipIf(!support.supported)("heartbeat environment selection boundary", 
     expect(result.requestedShouldReuseExisting).toBe(true);
     expect(result.reusableExistingExecutionWorkspace).toBeNull();
     expect(result.requestedReusableExecutionWorkspaceConfig).toBeNull();
+  });
+
+  it.each(["muse", "openai_dot", "grok_bot"] as const)("keeps %s managed placement without adopting the task's selected workspace", async provider => {
+    const { input, issue, workspace } = await fixture();
+    const source = await workspace();
+    const [sandbox] = await db.insert(environments).values({ name: `External controller ${provider}`, driver: "sandbox", status: "active", config: { provider: "fake" } }).returning();
+    input.agent.adapterType = "paperclip_runner";
+    input.agent.adapterConfig = { provider };
+    input.agent.defaultEnvironmentId = sandbox.id;
+    input.task.issueRef!.executionWorkspaceId = source.id;
+    input.task.issueRef!.projectWorkspaceId = randomUUID();
+    input.task.boundSourceWorkspace = source;
+    input.task.workspaceProjectContext = { hasWorkspace: true };
+    input.task.hasSelectedWorkspaceSource = true;
+    input.task.taskWorkspaceIntent = { version: 1, source: "explicit", selection: { kind: "task_directory" } };
+    await db.update(issues).set({ originKind: "chat_channel" }).where(eq(issues.id, issue.id));
+    const read = vi.spyOn(input.services.executionWorkspacesSvc, "getStoredById").mockRejectedValue(new Error("Task source must remain inaccessible"));
+    const select = vi.spyOn(input.services.executionWorkspacesSvc, "validateSelection").mockRejectedValue(new Error("Task selection must remain inaccessible"));
+    try {
+      const result = await selectHeartbeatEnvironment(db, input);
+      expect(result).toMatchObject({ isDotRun: true, selectedEnvironmentId: sandbox.id,
+        existingExecutionWorkspace: null, reusableExistingExecutionWorkspace: null,
+        nativeChatWorkspaceScope: null, useIsolatedTaskDirectory: false, explicitTaskDirectory: false });
+      expect(read).not.toHaveBeenCalled();
+      expect(select).not.toHaveBeenCalled();
+      expect(input.services.findSharedWorkspaceHolder).not.toHaveBeenCalled();
+      expect(input.task.issueRef!.executionWorkspaceId).toBe(source.id);
+    } finally { read.mockRestore(); select.mockRestore(); }
   });
 
   it("uses the low-trust task sandbox even when workspace feature gates hide issue settings", async () => {

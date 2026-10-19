@@ -106,10 +106,17 @@ using the setup person's authorized GitHub connection. New skills import automat
 unless excluded. Existing projects can adopt their repositories from Skills → Sources;
 existing manually imported sources preserve their selections and gain automatic updates.
 Refresh remains available, and operators can pause automatic updates.
-If a tracked repository grows beyond the supported package size, its installed
-repository skills and shared dependencies remain available until a safe refresh
-can succeed. Initial oversized imports can use self-contained skill packages;
-packages with omitted dependencies are invalid and are not installed.
+Independent skill sources have a searchable branch picker with the repository's
+default branch marked. People can also enter a branch name that is not listed.
+Saving checks GitHub access and the selected ref before changing tracking; failed
+saves keep the selection and installed content. Project refs remain owned by project
+configuration so changing a source cannot redirect another project's tracking.
+If a repository exceeds the supported package size, Paperclip first packages its
+skill folders and referenced repository files, preserving their original paths.
+Missing references are advisory: a valid selected skill can still be imported.
+Unavailable files are listed, and existing installed dependencies are retained
+when a bounded refresh cannot preserve them. File limits and content validation
+still apply; importing never executes repository code.
 
 Project-derived skills inherit current project access. Access through any originating
 project is sufficient, including the responsible-user restrictions on agent execution.
@@ -122,6 +129,10 @@ Task and routine skill mentions remain stable references to the latest installed
 Each execution records the immutable versions it uses; resuming keeps those versions,
 while a new execution resolves latest again. Upstream failures and removals preserve
 installed snapshots. GitHub refresh does not delay task execution.
+
+Old, unused skill-version disk caches expire automatically while current and in-use
+versions remain. Saved database snapshots rebuild an expired copy on demand, including
+when its upstream repository is unavailable. Recovery data has separate retention.
 
 Disconnecting removes a repository from Sources after an explicit choice: keep
 independent editable copies in My Skills, or delete its imported skills. Kept

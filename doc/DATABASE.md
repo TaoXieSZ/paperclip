@@ -2,6 +2,104 @@
 
 Paperclip uses PostgreSQL via [Drizzle ORM](https://orm.drizzle.team/). There are three ways to run the database, from simplest to most production-ready.
 
+### Task query performance
+
+Run-context lookups use expression indexes for both `context_snapshot.issueId`
+and `context_snapshot.paperclipIssue.id`. Task creation provenance has its own
+company-scoped expression index that follows the query's native issue ID and
+legacy `issueId`/`taskId`/`taskKey` precedence. Migration 0345 builds the two new
+indexes concurrently and can resume an interrupted build without blocking run
+writes for the full build. The indexes add storage and run-write overhead; they
+do not change task visibility or secret redaction.
+
+The chat wake-notice sweep compares UUID columns directly against guarded,
+canonical lowercase UUID payload values. Malformed and noncanonical payloads
+still match nothing. The query can use existing primary keys without adding a
+wakeup-history index.
+
+To compare all three queries on the same disposable local PostgreSQL fixture:
+
+```sh
+pnpm --filter @paperclipai/server exec tsx ../scripts/benchmark-slow-queries.ts --baseline-ref=origin/master
+```
+
+Use a revision before these fixes for `--baseline-ref` after they merge. The
+benchmark loads that revision's chat query, uses synthetic data only, compares
+complete returned rows, and prints timings and `EXPLAIN (ANALYZE, BUFFERS)` plans.
+Local results measure query execution, not staging request latency.
+
+Run history defaults to 200 rows and permits at most 1,000 rows, including
+direct service calls. The UI client requests 200 rows when its caller omits a
+limit. Context summaries expand the stored JSON once per returned row, retaining
+legacy text conversion and the first-class issue binding. Authorization and
+secret redaction still run on the bounded result set.
+Agent detail links fetch an older selected run by ID when it is outside the
+history page, and verify that it belongs to the current company and agent.
+
+Saved-run policy and parent-report lookups read only the `executionPolicy`
+value or the legacy `issueId` and `taskId` values from a run context. PostgreSQL projects
+those JSON values before it sends the row to the controller. Unused prompt and
+launch context does not travel with each policy or parent-report check. JSON
+types, task-key precedence, and company and agent identity checks are preserved.
+Each decision still reads current data; this is not an authorization cache.
+
+Repository-root checks load retained run, agent and task identities in batches
+of at most 500 IDs. They keep each run's task binding, responsible user and saved
+policy separate, even when several runs use the same agent. Project settings and
+saved policies for batched read authorization are also loaded once per operation.
+The next admission or publication reloads these records and permission grants.
+The queries exclude run results and unused launch context.
+
+The initial agent JWT run lookup reads only the cancellation state and
+conversation flag from saved run JSON. It does not transfer the full context or
+result. Run status, responsible-user identity, company and agent boundaries,
+and the cancellation response remain unchanged. Later identity refreshes keep
+their existing transaction and data reads.
+
+To measure authentication query responses on disposable synthetic data:
+
+```sh
+pnpm --filter @paperclipai/server exec tsx ../scripts/benchmark-agent-authentication.ts --baseline-ref=06689c1b3410000bcd65ff40cb469e600209c4db
+```
+
+This compares the current query with the original query in that revision. It
+checks the complete authentication decision and reports returned JSON bytes,
+local query timings, and execution plans. It does not measure request latency
+or fleet-wide savings.
+
+To compare the real summary and full history queries with an earlier revision:
+
+```sh
+pnpm --filter @paperclipai/server exec tsx ../scripts/benchmark-run-history.ts --baseline-ref=1e731520bb
+```
+
+The fixture has 1,400 synthetic runs with 192 KiB contexts. Both queries return
+the same 200 complete rows. This benchmark excludes HTTP and redaction latency.
+
+Workspace reads also compare retained task IDs as guarded, canonical UUIDs.
+This lets PostgreSQL check each source task by primary key before it evaluates
+task privacy. Casting the indexed task ID to text can instead evaluate privacy
+across company history for each workspace. Repository admission repeats these
+reads while holding its company provenance lock, so that plan can delay other
+agent launches. Missing, malformed, noncanonical, and foreign-company source
+IDs still deny access.
+
+The subsequent source-task enumeration also keeps `issues.id` as a UUID. Its
+OR predicate combines the workspace binding index with the task primary key.
+Casting that ID to text forces another scan of company history even after the
+workspace privacy query has passed. The workspace authorization regression
+suite checks both plans and verifies the attached and retained source results.
+
+To compare this query on a disposable fixture with 13,429 tasks:
+
+```sh
+pnpm --filter @paperclipai/server exec tsx ../scripts/benchmark-workspace-authorization.ts --baseline-ref=5c7a025032
+```
+
+The benchmark loads the baseline authorization module with current dependencies,
+compares complete workspace rows, and prints five warm samples and query plans.
+It measures SQL execution, not the full repository admission or agent startup.
+
 ## 1. Embedded PostgreSQL — zero config
 
 If you don't set `DATABASE_URL`, the server automatically starts an embedded PostgreSQL instance and manages a local data directory.
@@ -203,6 +301,18 @@ completed lookups and the separate liveness backfill are not replayed. Projectio
 callers that use a transaction retain single-attempt reads. The opt-in is only
 for a pooled database handle outside a transaction.
 
+## Tool profile reads
+
+Tool profile list, detail, and new-tool review queries select only the catalog
+identity, selector, and review fields that they use. They do not load tool input
+or output schemas, annotations, or provider metadata. Application and connection
+lookups for these paths read only IDs and display names. Profile entries,
+bindings, counts, review descriptions, and company filters retain their existing
+behavior. The full catalog and tool execution paths still read their schemas.
+Attention counts use the same catalog projection and read only invocation IDs
+and connection IDs to associate pending requests. Summary queries also omit
+review titles and descriptions; the separate review query still returns them.
+
 ## Execution identity row locks
 
 Identity initialization, credential acquisition, and steering reconciliation lock
@@ -300,6 +410,14 @@ restart with stale provider variables on an isolated warm application first.
 Rollback by setting the marker to `0` and restarting. No schema changes are
 required. This mechanism does not sleep claimed workspaces or replace a durable
 scheduler for their background work.
+
+## Feedback history and idle sleep
+
+Automatic idle checks treat private, unshared feedback as saved data. A sent
+feedback export is history only when its completion timestamp exists and its
+failure reason is clear. Pending, failed, unknown, and inconsistent exports
+still keep the instance awake. These checks do not delete history or change
+feedback sharing and retry behavior.
 
 ## Resource membership tables
 
@@ -788,6 +906,16 @@ source identity even if it currently resolves to that default branch. API-key
 agents without an authenticated run may attach repositories; their durable import
 jobs have no setup person and require adoption by an authorized person.
 
+Independent sources can change their tracked branch or revision through source
+settings, including `HEAD` to follow the default branch. Validate the repository
+identity and the requested commit read
+before changing the ref; preserve installed skill IDs, versions and selection. Active
+project bindings must change their ref through the project configuration. `HEAD`
+remains the default-branch alias after refresh, including for independent sources.
+Branch changes use the source revision and lease fence, reject duplicate repository/ref
+sources, keep installed version rows unchanged, and enqueue the normal refresh path.
+Branch listing uses the caller's authorized connection, not the stored setup identity.
+
 ### Task workspace records (2026-10-09)
 
 Migration [0336_big_crystal.sql](../packages/db/src/migrations/0336_big_crystal.sql) makes `execution_workspaces.project_id` nullable and changes its project reference to `ON DELETE RESTRICT`: source-project policy cannot disappear while a workspace still depends on it. `issues.execution_workspace_id` remains the sole active task binding. Versioned selection/pending-selection JSON and a binding revision record intent and protect transitions; they are not additional active bindings. Accepting a new pending choice advances the revision without changing the active folder. Its receipt retains the original request revision, so current-choice retries are idempotent and superseded retries fail the revision check.
@@ -797,6 +925,10 @@ Migration [0336_big_crystal.sql](../packages/db/src/migrations/0336_big_crystal.
 Migration [0337_exotic_proemial_gods.sql](../packages/db/src/migrations/0337_exotic_proemial_gods.sql) adds internal `execution_workspace_repository_roots` records. A company and hash of its canonical physical path uniquely identify a sticky `anonymous_only` or `managed` acquisition reservation. Short transactions serialize reservations with repository requests and credential promotion, preventing private publication after low-trust admission checks. Records have no workspace foreign key: mutable workspace metadata, relocation, archival or deletion cannot release a physical folder still accessible to an admitted run. There is no automatic mode change or reservation deletion.
 
 Migration [0338_absurd_vengeance.sql](../packages/db/src/migrations/0338_absurd_vengeance.sql) adds internal `execution_workspace_repository_access` provenance. Company/canonical-root source entries retain execution-workspace and source-project identities; reader entries retain the exact admitted run, task, agent and responsible user. New repository receipts also record their root at creation; legacy receipts receive no inferred origin. Shared project-source entries retain which physical owners require workspace write authority. Current admission, selection, requests and publication check the current task’s writer against those owners; retained past readers and file APIs still require only read authority. Genuine isolated copies retain source read access without requiring shared-folder write access. An existing linked worktree can recover a missing isolated-copy proof only after Git registration and its captured source owner are verified. Configured local sibling copies retain deny-only task/project source ownership on the bound task root before materialization; ordinary repository clones create no isolation proof. The shared root fence checks every reader against every source before admission and future publication, including tasks without repository requests. File APIs apply the same source privacy without writing provenance. These entries grant no authority and have no workspace or run deletion cascade; unavailable retained identity fails closed. Automatic provenance release is deferred, so a newly incompatible permission scope requires a separate physical root.
+
+Repository admission loads retained workspace and task sources in bounded batches. Readers share source rows and privacy evaluation for identical principals, but each retained run receives its own trust and responsible-user decision. The snapshot lasts only for one read batch; later admission and publication reload current authority. Keep source-loading query counts bounded as both workspace history and retained reader counts grow.
+
+Each physical-root scan resolves duplicate workspace paths once, with bounded concurrency for distinct paths. Alias results are discarded after that scan so later admission and publication recheck symlink targets. Provenance identities select overlapping root records through the company/root index; source retention writes use bounded batches under the existing company lock, including deny-only ownership retained after a failed copy authorization.
 
 Git-source capture checks the actual common Git storage directory and verified
 checkout owners. Separately stored metadata does not make its parent a checkout.
@@ -844,3 +976,41 @@ reservation per attempt. Failed downloads and package fallback keep the full
 reservation. Successfully linked small imports refund unused measured work.
 Completed bindings do not reset company credits; waiting jobs retry on refill.
 The company_skill_import_budgets table stores no credentials or source contents.
+
+### Execution recovery query performance
+
+Conversation recovery keeps indexed run and task UUID columns as UUIDs. Saved
+JSON identifiers pass a canonical lowercase UUID guard before conversion.
+Malformed, uppercase, numeric and cross-company values retain their old behavior.
+Ownership candidate reads split native and legacy issue bindings so existing
+indexes can filter candidates before reading large contexts. Native bindings
+continue to override legacy context IDs. No new index or migration is needed.
+
+```sh
+pnpm --filter @paperclipai/server exec tsx ../scripts/benchmark-recovery-queries.ts --baseline-ref=1e731520bb
+```
+
+This disposable fixture compares the real ownership, recovery-action and status
+delivery queries, including complete positional results and database plans.
+All data is synthetic. Query timings exclude process liveness probes, HTTP and
+provider work.
+
+### Agent runtime synchronization journal
+
+Migration 0347 adds the opt-in `agent_runtime` resource stream. Database triggers
+record content-free configuration invalidations and managed file audit events in
+`resource_lifecycle_events`. They share the mutation transaction and fail the
+mutation if journal insertion fails. An INSERT trigger sends an empty PostgreSQL
+notification on `paperclip_plugin_lifecycle` after commit. The host subscribes
+only when a ready runtime subscriber is installed. This feature requires a
+session-compatible database connection; do not enable it through a transaction
+pooler. Reconnection scans the durable journal. Existing process-local work
+signals continue to serve other delivery queues. See
+[the plugin contract](plugins/AGENT_RUNTIME_SYNC.md).
+
+Migration 0354 extends this stream to standing connection assignments. Statement
+triggers compare the fields returned by the assignment snapshot and coalesce
+company invalidation within the mutation transaction. Agent runtime journaling
+uses ordered `FOR NO KEY UPDATE` locks, which remain compatible with foreign-key
+references while excluding runtime readers' `FOR SHARE` locks. Connector feature
+switches use the same journal; process-start overlays receive a delivery baseline.

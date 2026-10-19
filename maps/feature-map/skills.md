@@ -57,6 +57,18 @@ Automated: [policy service](../../server/src/__tests__/company-skill-policy-serv
 
 Manual: Enable the skill for one test agent and leave another without access. Run a small task on each, inspect the available skill context, then change the release/policy and verify the next eligible run uses the intended version.
 
+A Paperclip Runner run with no selected skills must proceed while another run
+holds the company skill-cache lock. A saved empty selection remains empty after
+later assignments. Selected skills and the legacy operational skill retain cache
+exclusion through version pinning. The [configuration regression](../../server/src/__tests__/heartbeat-execution-configuration.test.ts)
+uses a real PostgreSQL lock; live provider latency remains a separate check.
+
+Concurrent selected-skill preparations share one in-flight company inventory
+refresh before cache locking. Each run retains its own selection and durable
+version pins. The [concurrency regression](../../server/src/__tests__/company-skills-runtime-concurrency.test.ts)
+checks shared work and separate actor access; the cache tests check that cleanup
+cannot remove a snapshot before the run stores its pins.
+
 ## Gotchas
 
 - The release picker requires `enableBetaSkills`. Do not invent an Instructions
@@ -65,19 +77,41 @@ Manual: Enable the skill for one test agent and leave another without access. Ru
 - Installed does not mean enabled for every agent.
 - Read-only GitHub/bundled skills may require a writable copy rather than an in-place edit.
 - Studio interaction coverage is in [questions and approvals](./questions-and-approvals.md); a passing mock is not a live harness test.
+- Old version disk caches may expire; saved versions remain available. Verify a pinned
+  version is restored through normal execution with upstream unavailable. Current
+  and in-use versions stay materialized. See [cleanup controls](../../doc/recoverable-disk-cleanup.md)
+  and the [database-backed cache tests](../../server/src/__tests__/skill-version-cache.test.ts).
 
 ### Project repository source behavior
 
 New GitHub project repositories import skills automatically. Skills → Sources lists
-accessible legacy repositories with Import skills, shows source/project provenance,
-and provides Refresh and Automatic updates in its source menu. Verify future additions,
+accessible legacy repositories with Import skills, shows each saved repository once with
+its access scope but without project names, and groups matching repository/ref workspaces.
+Additional legacy imports for an existing source live in its More menu. Import progress
+appears in the source metadata; Refresh and Automatic updates are also available.
+Verify future additions,
 retained exclusions, error recovery and reload persistence. Private-only sources must
 be absent for unrelated people/agents; access through either originating project is sufficient.
+
+For an oversized repository, preview and import a skill that links to shared files
+outside its folder. Its saved version should include those files under the original
+repository paths. Missing references remain visible warnings and must not disable
+an otherwise valid skill's selection. Verify an existing source with cached dependency
+errors recovers on refresh without requiring a new upstream commit. A refresh that
+cannot preserve installed shared files retains the prior version.
 
 Storybook/browser coverage uses scoped fixtures. Live GitHub-to-routine execution
 must be verified separately; inspect resolved version IDs across an upstream update.
 
 ### Connection repair during an update
+
+A missing tracked branch is a branch repair, not a credential failure. On an independent
+source, choose a new branch from the searchable list or enter its name. The repository's
+default branch is marked and included even outside the first 100 listed branches.
+Loading or a failed list request does not prevent manual entry; saving validates the
+requested ref. Installed identities, selections and version pins remain. Project-tracked
+branches are changed in project settings. A saved connection
+is validated against both the repository and tracked revision before repair succeeds.
 
 Open Choose connection while a source is being refreshed. Select an authorized account and save. If the source changes, the dialog must retain that selection, load the current revision, and allow a second save without reopening. The [project repository browser suite](../../tests/storybook-visual/project-repository-skills.spec.ts) covers this recovery with simulated upstream data.
 
@@ -93,3 +127,9 @@ Sources: Source: [SkillStudio.tsx](../../ui/src/pages/SkillStudio.tsx), [company
 ### Documentation scope: Skills, Skill Studio, and teams
 
 Main library/Studio/source/policy and CLI team-install paths are mapped. Full source-provider conflicts, harness sync, and remote package variants remain; catalog UI is not a current top-level route.
+
+
+Installed skill updates and assignments can drive opt-in plugin runtime
+synchronization. Version pins remain effective. See
+[contract](../../doc/plugins/AGENT_RUNTIME_SYNC.md#skills) and
+[database coverage](../../server/src/__tests__/agent-runtime-skills.test.ts).

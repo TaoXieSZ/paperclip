@@ -1,5 +1,21 @@
 # Native workspace finalization ownership and recovery
 
+A native provider can fail before it submits a result while its workspace still
+contains unpublished edits. A prepared workspace reference is not an export
+receipt. Terminal provider failure pins the exact bound sandbox and records a
+file-recovery obligation in the same transaction as the failed run. Both setup
+failure handlers record that obligation before their terminal writer and provider
+cleanup run. This includes descriptor reads that fail inside runtime selection. Only its exact live recovery claim can settle an owned
+preparation failure; another owner or a stale claim prevents cleanup. Settling
+that claim and recording file retention share a transaction.
+
+The recovery card names the original run and requires evidence that its exact
+allocation stopped and its files were recovered. Recording that evidence does
+not retry the old turn, certify unknown external actions, change the current task
+owner or status, or require an accepted native result. Accepted-result export
+recovery and same-run provider recovery keep their existing paths. An export
+that has already finalized does not create this file obligation.
+
 Native workspace export and merge acquire a PostgreSQL advisory lock scoped to
 company and run before the first physical copyback. The live heartbeat and the
 reconciler share that lock. Recovery skips a busy owner without recording another
@@ -34,6 +50,14 @@ successful workspace barrier proves its copyback finished. A dead parent can
 leave tar/Git children alive, so incomplete copyback requires operator stop
 verification even on the same host. PID reuse is checked against its recorded
 start time rather than trusted by PID alone.
+
+When PostgreSQL configures an idle-transaction timeout, the owner probes its
+dedicated lock transaction at one third of that interval, capped at
+30 seconds. The probe stops and joins before the transaction is released. This
+keeps a live copyback from losing its lock only because filesystem work has no
+database statements. It does not disable the database timeout or reconnect a
+failed lock session. Publication still requires the physical connection and
+the exact durable owner token. A disabled timeout adds no periodic probe.
 
 ## Automatic cloud recovery
 
@@ -335,3 +359,65 @@ A retained source receipt records control-plane evidence; it does not prove the
 provider still holds the original bytes or that copy-back succeeded. Operators
 must verify and recover the exact source separately. Later successful runs and
 completed tasks do not certify recovery of earlier workspace files.
+
+### Continue after confirmed source destruction
+
+When an old export failed and its exact sandbox has a confirmed destruction
+receipt, the task can continue from surviving attachments. This is reconstruction,
+not recovery of the missing edits. The task's recovery notice exposes **Continue
+from saved sources** to board operators with `runtime:manage`. Select the surviving
+attachments, describe the missing work, and record the observed external action
+outcomes. A retained or unverified sandbox must use the existing export or file
+recovery path instead.
+The source task may still display `in_progress` after an older controller's
+run-only Stop. Reconstruction accepts that inactive state only with no execution
+or checkout owner and the same source, recovery and status-version checks; an
+operator does not need to manufacture a separate blocker merely to record recovery.
+
+`POST /api/issues/{id}/recovery-actions/reconstruct-workspace` records this choice.
+It validates the source run, accepted result, prepared descriptor, exact destroyed
+lease, current task owner and status version. It rejects active copyback owners,
+competing recovery, unreconciled newer executions, and attachments from another task or company.
+The transaction records attachment hashes and a durable fresh-session delivery
+intent. The old run, result, descriptor and failed finalization remain intact.
+Repeated submissions adopt the original intent. Normal admission rechecks source
+identity, attachments, authority, budgets, holds and task eligibility. It preserves
+the retry count and does not grant a new work window or replay completed actions.
+The agent must verify the selected attachments before rebuilding files.
+Queued successors recheck their exact reconstruction receipt, sources and current
+execution gates when claimed and immediately before provider handoff. A later
+human block cannot be overwritten by automatic checkout.
+Bounded retries keep the same reconstruction authority. Dispatch verifies the
+system wake and predecessor chain back to the approved first run. It rechecks
+the saved sources, remaining retry limits and current recovery obligations.
+Unrelated executions and uncertain predecessor outcomes still stop dispatch.
+
+A later native run-only cancellation may coexist with the older loss decision
+only after its exact Stop acknowledgement, stopped lease receipts, and board
+file-only repair have been recorded. Its external-action outcome must be
+`not_performed`; an unknown or performed action stays held. Reconstruction saves
+the identities and hashes of those repair decisions. Queue claim and dispatch
+recheck the same evidence, so a changed receipt or another later run requires a
+fresh decision. The cancelled run stays cancelled and is never replayed.
+
+Stop also preserves a native workspace prepared before `paperclip_finish`.
+The executor pins its files before releasing the environment. Startup and periodic
+recovery process a bounded batch of historical acknowledged cancellations that
+missed this step. The existing stop-only cleanup worker retains their exact
+sandboxes and records provider receipts; this does not reopen a task or start
+another turn. The normal file-only repair control remains required before an
+older lost-work reconstruction can proceed.
+If file retention loses the task lock, teardown keeps the source active for a
+later pass. Historical sources already stopping or stopped remain eligible under
+the existing exact-source checks. A stopped source requires the independent
+stop-and-retain receipts and must not have a competing allocation owner.
+Active warm allocations keep the same retention retry path. Only historical
+stopping or stopped sources require the ephemeral policy, because a reusable
+released allocation may already have a new owner.
+Daytona stop-only cleanup also accepts a freshly verified archived allocation.
+It first confirms that provider auto-delete is disabled. It leaves the archive
+cold, with its files preserved, and records the process as stopped.
+For a cancelled native run, the file-recovery form also offers an optional
+confirmation that no external actions were performed. Leave it unchecked unless
+the run history verifies that fact. The default records files without certifying
+action outcomes. Changing the selected source clears the evidence and confirmations.
