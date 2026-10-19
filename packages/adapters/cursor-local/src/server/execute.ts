@@ -208,6 +208,22 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   );
   let command = asString(config.command, "agent");
   const model = asString(config.model, DEFAULT_CURSOR_LOCAL_MODEL).trim();
+  // Ordered fallback models tried after the primary model fails transiently
+  // (timeout, network/quota/5xx-class errors). Config: adapterConfig.modelFallback.
+  const modelFallback = (() => {
+    const raw = config.modelFallback;
+    if (!Array.isArray(raw)) return [] as string[];
+    const seen = new Set<string>([model]);
+    const out: string[] = [];
+    for (const entry of raw) {
+      const id = asString(entry, "").trim();
+      if (id.length === 0 || seen.has(id)) continue;
+      seen.add(id);
+      out.push(id);
+    }
+    return out;
+  })();
+  const modelCandidates = [model, ...modelFallback];
   const mode = normalizeMode(asString(config.mode, ""));
 
   const workspaceContext = parseObject(context.paperclipWorkspace);
@@ -595,24 +611,24 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
   };
 
-  const buildArgs = (resumeSessionId: string | null) => {
+  const buildArgs = (resumeSessionId: string | null, attemptModel: string) => {
     const args = ["-p", "--output-format", "stream-json", "--workspace", effectiveExecutionCwd];
     if (resumeSessionId) args.push("--resume", resumeSessionId);
-    if (model) args.push("--model", model);
+    if (attemptModel) args.push("--model", attemptModel);
     if (mode) args.push("--mode", mode);
     if (autoTrustEnabled) args.push("--yolo");
     if (extraArgs.length > 0) args.push(...extraArgs);
     return args;
   };
 
-  const runAttempt = async (resumeSessionId: string | null) => {
+  const runAttempt = async (attemptModel: string, resumeSessionId: string | null) => {
     await hydrateFreshSessionHandoff(ctx, { resumedSession: Boolean(resumeSessionId) });
     const { basePrompt, promptMetrics } = buildPrompt(Boolean(resumeSessionId));
     const prompt = joinPromptSections([
       selectInitialCommunicationGuidance(context, { resumedSession: Boolean(resumeSessionId) }),
       basePrompt,
     ]);
-    const args = buildArgs(resumeSessionId);
+    const args = buildArgs(resumeSessionId, attemptModel);
     if (onMeta) {
       await onMeta({
         adapterType: "cursor",
@@ -630,14 +646,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const consumeAccounting = createCursorJsonlParser();
     const accountingLog = createUsageCheckpointLog(onLog, ctx.onUsage, stdout => {
       const parsed = consumeAccounting(stdout);
-      const provider = resolveProviderFromModel(model);
+      const provider = resolveProviderFromModel(attemptModel);
       const hasCompleteAccounting = parsed.usageComplete || parsed.costUsd != null;
       return {
         usage: parsed.usageReported ? parsed.usage : undefined,
         costUsd: parsed.costUsd,
         costStatus: hasCompleteAccounting ? undefined : "unpriced",
         usageBasis: "per_run", provider,
-        biller: resolveCursorBiller(effectiveEnv, billingType, provider), billingType, model,
+        biller: resolveCursorBiller(effectiveEnv, billingType, provider), billingType, model: attemptModel,
         complete: parsed.sawResult && hasCompleteAccounting,
       };
     });
@@ -693,8 +709,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
   };
 
-  const providerFromModel = resolveProviderFromModel(model);
-
   const toResult = (
     attempt: {
       proc: {
@@ -707,8 +721,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       };
       parsed: ReturnType<typeof parseCursorJsonl>;
     },
+    attemptModel: string,
     clearSessionOnMissingSession = false,
   ): AdapterExecutionResult => {
+    const providerFromModel = resolveProviderFromModel(attemptModel);
     const hasCompleteAccounting = attempt.parsed.usageComplete || attempt.parsed.costUsd != null;
     const usageComplete = hasCompleteAccounting && (attempt.parsed.sawResult || (attempt.parsed.sawLegacyStep
       && attempt.proc.exitCode === 0 && !attempt.proc.signal && !attempt.proc.timedOut
@@ -723,7 +739,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         usageBasis: "per_run",
         provider: providerFromModel,
         biller: resolveCursorBiller(effectiveEnv, billingType, providerFromModel),
-        model,
+        model: attemptModel,
         billingType,
         costUsd: attempt.parsed.costUsd,
         costStatus: hasCompleteAccounting ? undefined : "unpriced",
@@ -774,7 +790,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       sessionDisplayId: resolvedSessionId,
       provider: providerFromModel,
       biller: resolveCursorBiller(effectiveEnv, billingType, providerFromModel),
-      model,
+      model: attemptModel,
       billingType,
       costUsd: attempt.parsed.costUsd,
       costStatus: hasCompleteAccounting ? undefined : "unpriced",
@@ -787,22 +803,43 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
   };
 
+  const isTransientAttemptFailure = (attempt: Awaited<ReturnType<typeof runAttempt>>): { transient: boolean; reason: string } => {
+    if (attempt.proc.timedOut) return { transient: true, reason: `timed out after ${timeoutSec}s` };
+    if (attempt.proc.errorCode) return { transient: true, reason: `transport error ${attempt.proc.errorCode}` };
+    if ((attempt.proc.exitCode ?? 0) === 0) return { transient: false, reason: "" };
+    const blob = `${attempt.proc.stderr}\n${attempt.proc.stdout}`;
+    const hit = /econn|enotfound|etimedout|socket hang up|connection (?:lost|refused|reset)|timed? ?out|429|rate.?limit|quota|overloaded|over capacity|unavailable|bad gateway|502|503|504|5\d\d/i.exec(blob);
+    return hit ? { transient: true, reason: hit[0] } : { transient: false, reason: "" };
+  };
+
   try {
-    const initial = await runAttempt(sessionId);
+    let attemptModel = modelCandidates[0];
+    let attempt = await runAttempt(attemptModel, sessionId);
+    for (let i = 1; i < modelCandidates.length; i++) {
+      const verdict = isTransientAttemptFailure(attempt);
+      if (!verdict.transient) break;
+      const nextModel = modelCandidates[i];
+      await onLog(
+        "stdout",
+        `[paperclip] model "${attemptModel}" failed transiently (${verdict.reason}); falling back to "${nextModel}".\n`,
+      );
+      attemptModel = nextModel;
+      attempt = await runAttempt(attemptModel, sessionId);
+    }
     if (
       sessionId &&
-      !initial.proc.timedOut &&
-      (initial.proc.exitCode ?? 0) !== 0 &&
-      isCursorUnknownSessionError(initial.proc.stdout, initial.proc.stderr)
+      !attempt.proc.timedOut &&
+      (attempt.proc.exitCode ?? 0) !== 0 &&
+      isCursorUnknownSessionError(attempt.proc.stdout, attempt.proc.stderr)
     ) {
       await onLog(
         "stdout",
         `[paperclip] Cursor resume session "${sessionId}" is unavailable; retrying with a fresh session.\n`,
       );
-      const retry = await runAttempt(null);
-      return toResult(retry, true);
+      const retry = await runAttempt(attemptModel, null);
+      return toResult(retry, attemptModel, true);
     }
-    return toResult(initial);
+    return toResult(attempt, attemptModel);
   } finally {
     try {
       await providerStop.collectBeforeRestore();
