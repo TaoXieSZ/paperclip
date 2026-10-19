@@ -87,7 +87,7 @@ describe("office model", () => {
     ]);
     expect(model.lounge).toEqual([{ name: "Bea", url: "/b.png" }]);
     expect(model.attention).toEqual([
-      { key: "attn-1", title: "Ship it", href: "/issues/PAP-1", whyNow: "needs a decision" },
+      { key: "attn-1", title: "Ship it", href: "/issues/PAP-1", whyNow: "needs a decision", interactionId: "s1", issueId: null, kind: null },
     ]);
   });
 
